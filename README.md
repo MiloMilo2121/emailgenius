@@ -26,6 +26,12 @@ playwright install chromium
 emailgenius analyze https://example.com --company "Azienda Demo" --show-email
 ```
 
+Workflow richiesto \"nome azienda + citta + news\":
+
+```bash
+emailgenius discover --company "Acme S.p.A." --city "Vicenza" --show-news --show-email
+```
+
 Output JSON salvato in `reports/`.
 
 ## Note importanti

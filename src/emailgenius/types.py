@@ -32,6 +32,22 @@ class EligibilityResult:
 
 
 @dataclass(slots=True)
+class SearchHit:
+    title: str
+    url: str
+    snippet: str = ""
+
+
+@dataclass(slots=True)
+class DiscoveryContext:
+    site_query: str
+    site_candidates: list[SearchHit] = field(default_factory=list)
+    selected_site: SearchHit | None = None
+    news_query: str = ""
+    news_results: list[SearchHit] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class AnalysisResult:
     created_at_utc: str
     input_url: str
@@ -40,3 +56,4 @@ class AnalysisResult:
     signals: CompanySignals
     eligibility: EligibilityResult
     outreach_email: str
+    discovery: DiscoveryContext | None = None

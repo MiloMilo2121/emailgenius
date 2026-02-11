@@ -5,5 +5,6 @@ __all__ = [
     "extraction",
     "scoring",
     "outreach",
+    "search",
     "pipeline",
 ]
