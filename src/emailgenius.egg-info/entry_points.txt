@@ -1,0 +1,2 @@
+[console_scripts]
+emailgenius = emailgenius.cli:main

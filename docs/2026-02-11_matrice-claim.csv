@@ -1,0 +1,20 @@
+area,claim_originale,esito,categoria_evidenza,azione_consigliata,fonte_principale
+Playwright,Auto-wait/actionability robusto,Confermato,Primaria ufficiale,Tenere,https://playwright.dev/docs/actionability
+Playwright,Shadow DOM support nativo,Confermato con limiti,Primaria ufficiale,Aggiungere eccezioni XPath/closed roots,https://playwright.dev/docs/locators
+Playwright,Multi-engine (Chromium/Firefox/WebKit),Confermato,Primaria ufficiale,Tenere,https://playwright.dev/docs/browsers
+Puppeteer,Strumento mono-engine Chromium,Non corretto (2026),Primaria ufficiale,Correggere in cross-browser Chrome+Firefox,https://pptr.dev/faq
+Puppeteer,Controllo low-level CDP superiore,Confermato,Primaria ufficiale,Tenere (scenari specialistici),https://pptr.dev/api/puppeteer.cdpsession
+Anti-bot,JA3/JA4 usati in rilevazione bot,Confermato,Primaria ufficiale,Tenere,https://developers.cloudflare.com/bots/additional-configurations/ja3-ja4-fingerprint/
+Stealth,Managed browser riduce complessita',Confermato (trend),Documentazione vendor,Tenere con nota lock-in e costi,https://docs.brightdata.com/scraping-automation/scraping-browser
+Proxy benchmark,Percentuali di successo provider altamente precise,Non verificabile indipendentemente,Dati vendor/terze parti,Riclassificare come claim vendor,
+MCP,MCP standard aperto e adottato,Confermato,Primaria ufficiale,Tenere,https://github.com/modelcontextprotocol/modelcontextprotocol
+LLM,Claude 3.7 top assoluto 2026,Parziale/datato,Primaria ufficiale,Aggiornare a routing dinamico modelli,https://docs.anthropic.com/en/docs/models-overview
+LLM,GPT-5 MATH 98.1,Non confermato,Primaria ufficiale,Rimuovere o sostituire con metriche ufficiali,https://openai.com/index/introducing-gpt-5/
+LLM,o3-mini per task economici ad alto volume,Confermato,Primaria ufficiale,Tenere,https://openai.com/research/openai-o3-mini/
+Orchestrazione,LangGraph checkpoint/time-travel/fault-tolerance,Confermato,Primaria ufficiale,Tenere,https://docs.langchain.com/oss/python/langgraph/persistence
+Vector DB,pgvector scelta pragmatica,Confermato,Primaria ufficiale,Tenere,https://github.com/pgvector/pgvector
+Vector DB,pgvectorscale con grossi boost,Parziale (benchmark vendor),Primaria+vendor,Validare con benchmark interno,https://github.com/timescale/pgvectorscale
+Normativa Italia,Transizione 5.0 soglie 3/5 e credito fino 45,Confermato,Primaria ufficiale,Tenere,https://www.mimit.gov.it/it/incentivi/piano-transizione-5-0
+Normativa Italia,Risorse Transizione 5.0 disponibili senza vincoli,Non aggiornato,Primaria ufficiale,Aggiornare stato esaurimento 07/11/2025,https://www.mimit.gov.it/it/notizie-stampa/mimit-esaurite-le-risorse-transizione-5-0
+Normativa UE,AI Act applicazione piena 2026,Confermato,Primaria ufficiale,Tenere con timeline precisa,https://digital-strategy.ec.europa.eu/en/policies/regulatory-framework-ai
+Privacy outreach,Email B2B con dati pubblici sempre lecita,Parziale/rischiosa,Normativa+Autorita',Aggiungere requisiti consenso/soft-spam,https://eur-lex.europa.eu/eli/dir/2002/58/2009-12-19/eng
