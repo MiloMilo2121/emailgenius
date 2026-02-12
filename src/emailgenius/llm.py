@@ -35,6 +35,35 @@ def format_email_body(value: str) -> str:
     return body.strip()
 
 
+def apply_template_replacements(
+    value: str,
+    *,
+    parent: ParentProfile,
+    company: LeadCompany,
+    contact: LeadContact | None,
+) -> str:
+    first_name = _contact_first_name(contact) or "tu"
+    replacements = {
+        "{{first_name}}": first_name,
+        "{{firstName}}": first_name,
+        "{{firstname}}": first_name,
+        "{{company_name}}": company.company_name,
+        "{{companyName}}": company.company_name,
+        "{{sender_name}}": parent.sender_name or parent.company_name,
+        "{{sender_company}}": parent.sender_company or parent.company_name,
+        "{{sender_phone}}": parent.sender_phone or "",
+        "{{sender_booking_url}}": parent.sender_booking_url or "",
+    }
+
+    rendered = value or ""
+    for key, replacement in replacements.items():
+        rendered = rendered.replace(key, replacement)
+
+    # Remove any remaining mustache placeholders to avoid sending unresolved templates.
+    rendered = re.sub(r"\{\{[^}]+\}\}", "", rendered)
+    return rendered
+
+
 def _rewrite_targets_for_variants(variant_names: list[str]) -> dict[str, tuple[float, float]]:
     defaults = {
         "A": (0.25, 0.30),
@@ -262,8 +291,24 @@ class LLMGateway:
                 global_flags: list[str] = []
                 for index, item in enumerate(variants_raw):
                     variant_name = str(item.get("variant") or requested_variants[min(index, len(requested_variants) - 1)]).upper()
-                    subject = format_email_subject(str(item.get("subject") or _fallback_subject(company=company, contact=contact)))
-                    body = format_email_body(str(item.get("body") or _render_seed_template(parent, company, contact)))
+                    subject_raw = str(item.get("subject") or _fallback_subject(company=company, contact=contact))
+                    body_raw = str(item.get("body") or _render_seed_template(parent, company, contact))
+                    subject = format_email_subject(
+                        apply_template_replacements(
+                            subject_raw,
+                            parent=parent,
+                            company=company,
+                            contact=contact,
+                        )
+                    )
+                    body = format_email_body(
+                        apply_template_replacements(
+                            body_raw,
+                            parent=parent,
+                            company=company,
+                            contact=contact,
+                        )
+                    )
                     cta = str(item.get("cta") or parent.cta_policy)
 
                     cleaned_text, claim_flags = apply_claim_guard(
@@ -272,8 +317,20 @@ class LLMGateway:
                     )
                     if "\n\n" in cleaned_text:
                         subject_line, body_text = cleaned_text.split("\n\n", 1)
-                        subject = format_email_subject(subject_line.replace("Oggetto:", "").strip() or subject)
-                        body = format_email_body(body_text.strip() or body)
+                        subject = apply_template_replacements(
+                            subject_line.replace("Oggetto:", "").strip() or subject,
+                            parent=parent,
+                            company=company,
+                            contact=contact,
+                        )
+                        body = apply_template_replacements(
+                            body_text.strip() or body,
+                            parent=parent,
+                            company=company,
+                            contact=contact,
+                        )
+                        subject = format_email_subject(subject)
+                        body = format_email_body(body)
 
                     quality_flags = _quality_gate_flags(
                         subject=subject,
@@ -294,6 +351,18 @@ class LLMGateway:
                         )
                         if repaired is not None:
                             repaired_subject, repaired_body = repaired
+                            repaired_subject = apply_template_replacements(
+                                repaired_subject,
+                                parent=parent,
+                                company=company,
+                                contact=contact,
+                            )
+                            repaired_body = apply_template_replacements(
+                                repaired_body,
+                                parent=parent,
+                                company=company,
+                                contact=contact,
+                            )
                             repaired_subject = format_email_subject(repaired_subject)
                             repaired_body = format_email_body(repaired_body)
                             repaired_flags = _quality_gate_flags(
@@ -561,20 +630,13 @@ def _fallback_subject(*, company: LeadCompany, contact: LeadContact | None) -> s
 
 
 def render_seed_template(parent: ParentProfile, company: LeadCompany, contact: LeadContact | None) -> str:
-    first_name = _contact_first_name(contact) or "tu"
     template = parent.outreach_seed_template or ""
-    replacements = {
-        "{{first_name}}": first_name,
-        "{{firstName}}": first_name,
-        "{{company_name}}": company.company_name,
-        "{{sender_name}}": parent.sender_name or parent.company_name,
-        "{{sender_company}}": parent.sender_company or parent.company_name,
-        "{{sender_phone}}": parent.sender_phone or "",
-        "{{sender_booking_url}}": parent.sender_booking_url or "",
-    }
-    rendered = template
-    for key, value in replacements.items():
-        rendered = rendered.replace(key, value)
+    rendered = apply_template_replacements(
+        template,
+        parent=parent,
+        company=company,
+        contact=contact,
+    )
     return rendered.strip()
 
 

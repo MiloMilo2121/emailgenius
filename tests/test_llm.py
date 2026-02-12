@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from emailgenius.llm import apply_template_replacements
 from emailgenius.llm import LLMGateway
 from emailgenius.llm import _coerce_variants_raw
 from emailgenius.types import EnrichmentDossier, LeadCompany, LeadContact, ParentProfile
@@ -126,6 +127,48 @@ class LLMFallbackTests(unittest.TestCase):
         self.assertEqual(len(coerced), 2)
         self.assertEqual(coerced[0].get("variant"), "A")
         self.assertEqual(coerced[1].get("variant"), "B")
+
+    def test_apply_template_replacements_renders_and_strips_mustache(self) -> None:
+        parent = ParentProfile(
+            slug="azienda-a",
+            company_name="Azienda A",
+            tone="formale-consulenziale",
+            sender_name="Ivan Lorenzoni",
+            sender_company="Contributo Facile",
+            sender_phone="+39 347 283 0680",
+            sender_booking_url="https://example.com/book",
+            outreach_seed_template="",
+        )
+        company = LeadCompany(
+            company_key="acme",
+            company_name="Acme SRL",
+            website="https://acme.example",
+            linkedin_company=None,
+            industry=None,
+            employee_count=None,
+            location=None,
+            keywords=None,
+            tech=None,
+            founded_year=None,
+        )
+        contact = LeadContact(
+            full_name="Mario Rossi",
+            title="CEO",
+            seniority="c_suite",
+            email="mario@example.com",
+            linkedin_person=None,
+            quality_flag=None,
+            score=80,
+        )
+        rendered = apply_template_replacements(
+            "Ciao {{firstName}}, proposta per {{companyName}}. {{unknown}}",
+            parent=parent,
+            company=company,
+            contact=contact,
+        )
+        self.assertIn("Mario", rendered)
+        self.assertIn("Acme SRL", rendered)
+        self.assertNotIn("{{", rendered)
 
 
 if __name__ == "__main__":

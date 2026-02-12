@@ -492,8 +492,10 @@ def _process_company_like_item(
     template_only = False
     used_llm = False
     template_warning = ""
+    enrichment_warning = ""
     snippets: list[str] = []
     global_flags: list[str] = []
+    enrichment_flags: list[str] = []
 
     if not company.website:
         # If the lead has no website, do not waste tokens or attempt web enrichment: use the seed template as-is.
@@ -541,6 +543,15 @@ def _process_company_like_item(
             if discovered_website and not company.website:
                 company.website = discovered_website
 
+            if effective_enrichment_mode != "minimal":
+                evidence_items = dossier.evidence or []
+                if any("Sito non analizzabile" in str(item) for item in evidence_items):
+                    enrichment_flags.append("enrichment_site_unreachable")
+                    enrichment_warning = "Sito non analizzabile: personalizzazione web limitata."
+                elif len((dossier.site_summary or "").strip()) < 120:
+                    enrichment_flags.append("enrichment_site_low_content")
+                    enrichment_warning = "Contenuti sito non estratti: personalizzazione web limitata."
+
             if rag_enabled:
                 retrieval_query = _build_retrieval_query(company=company, dossier=dossier)
                 retrieval_embeddings = llm.embed_texts([retrieval_query])
@@ -564,6 +575,10 @@ def _process_company_like_item(
                 max_retries=max_retries,
                 backoff_base_seconds=backoff_base_seconds,
             )
+            if enrichment_flags:
+                for variant in variants:
+                    flags = list(variant.risk_flags or [])
+                    variant.risk_flags = sorted(set(flags + enrichment_flags))
         except RuntimeError as exc:
             message = str(exc)
             if llm_policy == "strict" and ("LLM fatal error" in message or "LLM unavailable" in message):
@@ -625,6 +640,8 @@ def _process_company_like_item(
     warning_parts: list[str] = []
     if template_warning:
         warning_parts.append(template_warning)
+    if enrichment_warning:
+        warning_parts.append(enrichment_warning)
     if not passing_variants:
         warning_parts.append("Copy guard non superato dopo repair")
     elif failed_variants:
