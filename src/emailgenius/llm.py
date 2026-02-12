@@ -22,6 +22,19 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, value))
 
 
+def format_email_subject(value: str) -> str:
+    subject = (value or "").replace("\r", " ").replace("\n", " ").strip()
+    subject = re.sub(r"\s+", " ", subject)
+    return subject[:120].rstrip()
+
+
+def format_email_body(value: str) -> str:
+    body = (value or "").replace("\r\n", "\n").replace("\r", "\n")
+    body = "\n".join(line.rstrip() for line in body.split("\n"))
+    body = re.sub(r"\n{3,}", "\n\n", body)
+    return body.strip()
+
+
 def _rewrite_targets_for_variants(variant_names: list[str]) -> dict[str, tuple[float, float]]:
     defaults = {
         "A": (0.25, 0.30),
@@ -32,6 +45,17 @@ def _rewrite_targets_for_variants(variant_names: list[str]) -> dict[str, tuple[f
     for name in variant_names:
         out[name] = defaults.get(name.upper(), (0.25, 0.40))
     return out
+
+
+_HARD_QUALITY_FLAGS = {
+    # Deliverability / obvious "spam" signals
+    "spam_caps",
+    "spam_excessive_exclamation",
+    "spam_clickbait_subject",
+    "subject_too_long",
+    # Going far beyond rewrite target is a brand-risk signal (structure drift, new claims).
+    "rewrite_over_target",
+}
 
 
 def _coerce_variants_raw(value: object, *, preferred_order: list[str]) -> list[dict[str, Any]]:
@@ -194,6 +218,14 @@ class LLMGateway:
                     "no_artificial_urgency": True,
                     "no_clickbait_subject": True,
                 },
+                "formatting": {
+                    "short_paragraphs": True,
+                    "blank_line_between_paragraphs": True,
+                    "no_manual_line_wrapping": True,
+                    "signature_as_final_block": True,
+                    "use_bullets_for_long_lists": True,
+                },
+                "no_invented_facts": True,
                 "no_absolute_claims": True,
                 "no_ai_disclosure": True,
             },
@@ -206,6 +238,10 @@ class LLMGateway:
             "B con riscrittura ampia ma controllata (50-60%), C intermedia quando richiesta. "
             "Personalizza solo incipit, riferimento ruolo/azienda, micro-angolo valore e subject. "
             "Evita toni spam, clickbait, urgenza artificiale, MAIUSCOLO aggressivo, claim assoluti/non verificabili. "
+            "Formato: paragrafi brevi (1-2 frasi), una riga vuota tra paragrafi e tra blocchi tematici; "
+            "non andare a capo manualmente dentro un paragrafo; firma come blocco finale separato. "
+            "Se devi elencare piu di 3 elementi, usa bullet '-' (una voce per riga) con una riga vuota prima e dopo il blocco. "
+            "Non inventare dettagli: usa solo dati presenti nel JSON (company/contact/dossier/snippets); se mancano, resta generico. "
             "Output SOLO JSON valido con chiavi: variants, recommended_variant, quality_notes."
         )
         user_prompt = json.dumps(payload, ensure_ascii=False)
@@ -221,8 +257,8 @@ class LLMGateway:
                 global_flags: list[str] = []
                 for index, item in enumerate(variants_raw):
                     variant_name = str(item.get("variant") or requested_variants[min(index, len(requested_variants) - 1)]).upper()
-                    subject = str(item.get("subject") or _fallback_subject(company=company, contact=contact))
-                    body = str(item.get("body") or _render_seed_template(parent, company, contact))
+                    subject = format_email_subject(str(item.get("subject") or _fallback_subject(company=company, contact=contact)))
+                    body = format_email_body(str(item.get("body") or _render_seed_template(parent, company, contact)))
                     cta = str(item.get("cta") or parent.cta_policy)
 
                     cleaned_text, claim_flags = apply_claim_guard(
@@ -231,8 +267,8 @@ class LLMGateway:
                     )
                     if "\n\n" in cleaned_text:
                         subject_line, body_text = cleaned_text.split("\n\n", 1)
-                        subject = subject_line.replace("Oggetto:", "").strip() or subject
-                        body = body_text.strip() or body
+                        subject = format_email_subject(subject_line.replace("Oggetto:", "").strip() or subject)
+                        body = format_email_body(body_text.strip() or body)
 
                     quality_flags = _quality_gate_flags(
                         subject=subject,
@@ -253,6 +289,8 @@ class LLMGateway:
                         )
                         if repaired is not None:
                             repaired_subject, repaired_body = repaired
+                            repaired_subject = format_email_subject(repaired_subject)
+                            repaired_body = format_email_body(repaired_body)
                             repaired_flags = _quality_gate_flags(
                                 subject=repaired_subject,
                                 body=repaired_body,
@@ -264,9 +302,18 @@ class LLMGateway:
                                 subject, body = repaired_subject, repaired_body
                                 quality_flags = ["quality_repaired"]
                             else:
-                                quality_flags = sorted(set(quality_flags + repaired_flags + ["failed_copy_guard"]))
+                                hard_flags = [flag for flag in repaired_flags if flag in _HARD_QUALITY_FLAGS]
+                                if hard_flags:
+                                    quality_flags = sorted(set(quality_flags + repaired_flags + ["failed_copy_guard"]))
+                                else:
+                                    # Soft misses (e.g. rewrite budget slightly off, formatting preferences) are warnings,
+                                    # not blockers.
+                                    subject, body = repaired_subject, repaired_body
+                                    quality_flags = sorted(set(repaired_flags + ["quality_repaired"]))
                         else:
-                            quality_flags = sorted(set(quality_flags + ["failed_copy_guard"]))
+                            hard_flags = [flag for flag in quality_flags if flag in _HARD_QUALITY_FLAGS]
+                            if hard_flags:
+                                quality_flags = sorted(set(quality_flags + ["failed_copy_guard"]))
 
                     confidence = _clamp(float(item.get("confidence") or 0.65))
                     all_flags = sorted(set(claim_flags + quality_flags))
@@ -372,6 +419,9 @@ class LLMGateway:
                 "rispetta il range di riscrittura richiesto per la variante",
                 "rimuovi pattern spam/clickbait",
                 "mantieni tono business-safe",
+                "usa paragrafi brevi (1-2 frasi) con UNA riga vuota tra i paragrafi",
+                "non andare a capo manualmente dentro un paragrafo; usa il newline solo tra paragrafi/blocchi",
+                "firma come blocco finale separato da una riga vuota",
             ],
         }
         system_prompt = (
@@ -559,6 +609,11 @@ def _quality_gate_flags(
 
     if len(subject.strip()) > 90:
         flags.append("subject_too_long")
+
+    # Encourage scan-friendly formatting: enough whitespace between thematic blocks.
+    normalized_body = format_email_body(body)
+    if len(normalized_body) > 240 and normalized_body.count("\n\n") < 2:
+        flags.append("format_needs_whitespace")
 
     norm_seed = _normalize_similarity_text(seed_template)
     norm_body = _normalize_similarity_text(body)

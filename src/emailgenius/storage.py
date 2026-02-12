@@ -314,6 +314,18 @@ class PostgresStore:
                 )
         return campaign_id
 
+    def set_campaign_sheet_id(self, campaign_id: str, sheet_id: str) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE campaigns
+                    SET sheet_id=%s
+                    WHERE id=%s
+                    """,
+                    (sheet_id, campaign_id),
+                )
+
     def finalize_campaign(self, campaign_id: str, summary: CampaignSummary) -> None:
         summary_json = json.dumps(asdict(summary), ensure_ascii=False)
         with self._connect() as conn:

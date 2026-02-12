@@ -70,6 +70,20 @@ def build_parser() -> argparse.ArgumentParser:
     campaign_run.add_argument("--slug", required=True, help="Parent slug")
     campaign_run.add_argument("--leads", required=True, help="Leads CSV path")
     campaign_run.add_argument("--sheet-id", help="Google Sheet id for approval queue")
+    campaign_run.add_argument(
+        "--sheet-title",
+        help="Create a new Google Sheet with this title (requires --gsheets-auth oauth or GOOGLE_SERVICE_ACCOUNT_JSON)",
+    )
+    campaign_run.add_argument(
+        "--sheet-share-with",
+        help="Share the Google Sheet with this email as writer (service-account runs typically need this)",
+    )
+    campaign_run.add_argument(
+        "--gsheets-auth",
+        default="auto",
+        choices=["auto", "service_account", "oauth"],
+        help="Google Sheets auth mode: auto uses service account if configured",
+    )
     campaign_run.add_argument("--out-dir", default="reports/campaigns", help="Output directory")
     campaign_run.add_argument("--stages", default="all", help="Pipeline stages (default: all)")
     campaign_run.add_argument("--headful", action="store_true", help="Run browser in headed mode")
@@ -299,6 +313,9 @@ def main() -> int:
                 leads_csv_path=args.leads,
                 out_dir=args.out_dir,
                 sheet_id=args.sheet_id,
+                sheet_title=args.sheet_title,
+                sheet_share_with=args.sheet_share_with,
+                gsheets_auth=args.gsheets_auth,
                 stages=args.stages,
                 headless=not args.headful,
                 recipient_mode=args.recipient_mode,

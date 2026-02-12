@@ -16,8 +16,8 @@ from .leads import (
     select_primary_contact,
     build_company_and_contacts,
 )
-from .llm import LLMGateway, render_seed_template
-from .sheets import approval_columns, publish_approval_rows
+from .llm import LLMGateway, format_email_body, format_email_subject, render_seed_template
+from .sheets import approval_columns, publish_campaign_to_sheets
 from .storage import PostgresStore
 from .types import ApprovalRecord, CampaignCompanyResult, CampaignSummary, DraftEmailVariant, EnrichmentDossier
 from .utils import utc_now_iso, write_csv
@@ -44,6 +44,9 @@ def run_campaign(
     leads_csv_path: str,
     out_dir: str,
     sheet_id: str | None,
+    sheet_title: str | None = None,
+    sheet_share_with: str | None = None,
+    gsheets_auth: str = "auto",
     stages: str = "all",
     headless: bool = True,
     recipient_mode: str = "company",
@@ -213,13 +216,45 @@ def run_campaign(
     export_path = out_base / f"campaign-{campaign_id}.csv"
     write_csv(export_path, export_rows, all_columns)
 
-    if sheet_id and config.google_service_account_json:
-        publish_approval_rows(
+    published_sheet_id = sheet_id
+    if sheet_id or sheet_title:
+        auth_mode = (gsheets_auth or "auto").lower()
+        if auth_mode not in {"auto", "service_account", "oauth"}:
+            raise ValueError("gsheets_auth must be one of: auto, service_account, oauth")
+
+        service_account_json = config.google_service_account_json
+        auth_interactive = False
+        if auth_mode == "oauth":
+            service_account_json = None
+            auth_interactive = True
+        elif auth_mode == "service_account":
+            if not service_account_json:
+                raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON is required for gsheets_auth=service_account")
+        else:
+            # auto: use service account if configured, otherwise require explicit oauth mode
+            if not service_account_json:
+                raise ValueError(
+                    "Google Sheets auth not configured. "
+                    "Set GOOGLE_SERVICE_ACCOUNT_JSON or re-run with --gsheets-auth oauth."
+                )
+
+        publish_result = publish_campaign_to_sheets(
             sheet_id=sheet_id,
+            sheet_title=sheet_title,
+            sheet_share_with=sheet_share_with,
             rows=export_rows,
+            sendready_columns=all_columns,
+            service_account_json=service_account_json,
             output_schema=output_schema,
-            service_account_json=config.google_service_account_json,
+            auth_interactive=auth_interactive,
         )
+        published_sheet_id = publish_result.sheet_id
+        try:
+            store.set_campaign_sheet_id(campaign_id, published_sheet_id)
+        except Exception:
+            # Non-critical: keep summary_json as source of truth.
+            pass
+        print(f"[gsheets] published: {publish_result.spreadsheet_url}")
 
     per_item_estimated_cost = estimated_cost_eur / max(llm_items_planned, 1)
     actual_cost_eur = round(per_item_estimated_cost * llm_items_attempted, 2) if llm_items_planned else 0.0
@@ -228,7 +263,7 @@ def run_campaign(
         campaign_id=campaign_id,
         parent_slug=parent_slug,
         leads_file=leads_csv_path,
-        sheet_id=sheet_id,
+        sheet_id=published_sheet_id,
         status="COMPLETED",
         companies_total=processed_companies,
         generated_total=rows_generated_ok,
@@ -464,16 +499,16 @@ def _process_company_like_item(
         # If the lead has no website, do not waste tokens or attempt web enrichment: use the seed template as-is.
         template_only = True
         dossier = _minimal_dossier(company_name=company.company_name)
-        rendered = render_seed_template(parent, company, primary_contact)
-        subject = _template_only_subject(company=company, contact=primary_contact)
+        rendered = format_email_body(render_seed_template(parent, company, primary_contact))
+        subject = format_email_subject(_template_only_subject(company=company, contact=primary_contact))
         cleaned_text, claim_flags = apply_claim_guard(
             f"Oggetto: {subject}\n\n{rendered}",
             parent.no_go_claims,
         )
         if "\n\n" in cleaned_text:
             subject_line, body_text = cleaned_text.split("\n\n", 1)
-            subject = subject_line.replace("Oggetto:", "").strip() or subject
-            rendered = body_text.strip() or rendered
+            subject = format_email_subject(subject_line.replace("Oggetto:", "").strip() or subject)
+            rendered = format_email_body(body_text.strip() or rendered)
 
         requested_variants = ["A", "B", "C"] if variant_mode.lower() == "abc" else ["A", "B"]
         base_flags = sorted(set(claim_flags + ["template_only_no_website"]))
