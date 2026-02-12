@@ -71,7 +71,8 @@ CANONICAL_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "Company Phone Number": ("Company Phone Number", "companyPhone", "phone"),
 }
 
-DEFAULT_REQUIRED_FIELDS = ("Email", "First Name", "Company Name", "Company Website Full")
+# Website is optional: leads without a site can still be processed using the seed template.
+DEFAULT_REQUIRED_FIELDS = ("Email", "First Name", "Company Name")
 
 
 def read_leads_csv(path: str | Path) -> list[dict[str, str]]:
@@ -163,10 +164,16 @@ def group_rows_by_company(rows: list[dict[str, str]]) -> dict[str, list[dict[str
 
 def build_company_and_contacts(company_rows: list[dict[str, str]]) -> tuple[LeadCompany, list[LeadContact]]:
     first = company_rows[0]
+    # Pick the first valid website across all rows for this company. CSVs often have sparse columns per contact.
+    website = None
+    for row in company_rows:
+        website = _clean_url(row.get("Company Website Full"))
+        if website:
+            break
     company = LeadCompany(
         company_key=_company_key(first),
         company_name=_first_non_empty(first, ["Company Name", "Cleaned Company Name"]) or "Azienda",
-        website=_clean_url(first.get("Company Website Full")),
+        website=website,
         linkedin_company=_clean_url(first.get("Company LinkedIn Link")),
         industry=_empty_to_none(first.get("Industry")),
         employee_count=_parse_int(first.get("Employee Count")),

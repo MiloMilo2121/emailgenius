@@ -3,9 +3,11 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .config import AppConfig
 from .enrichment import build_enrichment_dossier_sync
+from .guardrails import apply_claim_guard
 from .leads import (
     format_header_mapping,
     group_rows_by_company,
@@ -14,7 +16,7 @@ from .leads import (
     select_primary_contact,
     build_company_and_contacts,
 )
-from .llm import LLMGateway
+from .llm import LLMGateway, render_seed_template
 from .sheets import approval_columns, publish_approval_rows
 from .storage import PostgresStore
 from .types import ApprovalRecord, CampaignCompanyResult, CampaignSummary, DraftEmailVariant, EnrichmentDossier
@@ -81,7 +83,9 @@ def run_campaign(
         f"skipped={preflight.rows_skipped} required={','.join(preflight.required_fields)}"
     )
 
-    estimated_cost_eur = _estimate_cost_eur(preflight.rows_valid)
+    llm_items_planned = _estimate_llm_items_planned(preflight=preflight, recipient_mode=recipient_mode)
+    estimated_cost_eur = _estimate_cost_eur(llm_items_planned)
+    print(f"[preflight] llm_items_planned={llm_items_planned} (rows/companies with valid website)")
     if estimated_cost_eur > cost_cap_eur and not force_cost_override:
         raise ValueError(
             f"Estimated campaign cost {estimated_cost_eur:.2f} EUR exceeds cap {cost_cap_eur:.2f} EUR. "
@@ -100,6 +104,7 @@ def run_campaign(
     rows_generated_ok = 0
     rows_failed = 0
     processed_companies = 0
+    llm_items_attempted = 0
     export_rows: list[dict[str, object]] = []
 
     if recipient_mode == "row":
@@ -138,6 +143,8 @@ def run_campaign(
             if outcome.fatal_error:
                 raise RuntimeError(outcome.error_message or "Fatal campaign error")
             export_rows.append(outcome.export_row)
+            if bool(outcome.extra_payload.get("used_llm")):
+                llm_items_attempted += 1
             if outcome.warning:
                 warnings_total += 1
             if outcome.failed:
@@ -172,6 +179,8 @@ def run_campaign(
             if outcome.fatal_error:
                 raise RuntimeError(outcome.error_message or "Fatal campaign error")
             export_rows.append(outcome.export_row)
+            if bool(outcome.extra_payload.get("used_llm")):
+                llm_items_attempted += 1
             if outcome.warning:
                 warnings_total += 1
             if outcome.failed:
@@ -212,8 +221,8 @@ def run_campaign(
             service_account_json=config.google_service_account_json,
         )
 
-    per_row_estimated_cost = estimated_cost_eur / max(preflight.rows_valid, 1)
-    actual_cost_eur = round(per_row_estimated_cost * rows_generated_ok, 2)
+    per_item_estimated_cost = estimated_cost_eur / max(llm_items_planned, 1)
+    actual_cost_eur = round(per_item_estimated_cost * llm_items_attempted, 2) if llm_items_planned else 0.0
 
     summary = CampaignSummary(
         campaign_id=campaign_id,
@@ -390,79 +399,114 @@ def _process_company_like_item(
     company, contacts = build_company_and_contacts(canonical_rows)
     primary_contact = select_primary_contact(contacts)
 
-    try:
-        if effective_enrichment_mode == "minimal":
-            dossier = _minimal_dossier(company_name=company.company_name)
-            discovered_website = company.website
-        else:
-            dossier, discovered_website = build_enrichment_dossier_sync(
+    template_only = False
+    used_llm = False
+    template_warning = ""
+    snippets: list[str] = []
+    global_flags: list[str] = []
+
+    if not company.website:
+        # If the lead has no website, do not waste tokens or attempt web enrichment: use the seed template as-is.
+        template_only = True
+        dossier = _minimal_dossier(company_name=company.company_name)
+        rendered = render_seed_template(parent, company, primary_contact)
+        subject = _template_only_subject(company=company, contact=primary_contact)
+        cleaned_text, claim_flags = apply_claim_guard(
+            f"Oggetto: {subject}\n\n{rendered}",
+            parent.no_go_claims,
+        )
+        if "\n\n" in cleaned_text:
+            subject_line, body_text = cleaned_text.split("\n\n", 1)
+            subject = subject_line.replace("Oggetto:", "").strip() or subject
+            rendered = body_text.strip() or rendered
+
+        requested_variants = ["A", "B", "C"] if variant_mode.lower() == "abc" else ["A", "B"]
+        base_flags = sorted(set(claim_flags + ["template_only_no_website"]))
+        variants = [
+            DraftEmailVariant(
+                variant=name,
+                subject=subject,
+                body=rendered,
+                cta=parent.cta_policy,
+                risk_flags=base_flags,
+                confidence=0.55,
+            )
+            for name in requested_variants
+        ]
+        recommended_variant = requested_variants[0] if requested_variants else "A"
+        template_warning = "Website mancante: usato seed template senza personalizzazione web."
+    else:
+        used_llm = True
+        try:
+            if effective_enrichment_mode == "minimal":
+                dossier = _minimal_dossier(company_name=company.company_name)
+                discovered_website = company.website
+            else:
+                dossier, discovered_website = build_enrichment_dossier_sync(
+                    company=company,
+                    contact=primary_contact,
+                    headless=headless,
+                    max_extra_pages=2,
+                )
+            if discovered_website and not company.website:
+                company.website = discovered_website
+
+            if rag_enabled:
+                retrieval_query = _build_retrieval_query(company=company, dossier=dossier)
+                retrieval_embeddings = llm.embed_texts([retrieval_query])
+                if retrieval_embeddings:
+                    search_results = store.search_knowledge_chunks(
+                        parent_slug=parent_slug,
+                        kind="marketing",
+                        query_embedding=retrieval_embeddings[0],
+                        top_k=6,
+                    )
+                    snippets = [str(item.get("content") or "") for item in search_results if item.get("content")]
+
+            variants, recommended_variant, global_flags = llm.generate_campaign_variants(
+                parent=parent,
                 company=company,
                 contact=primary_contact,
-                headless=headless,
-                max_extra_pages=2,
+                dossier=dossier,
+                marketing_snippets=snippets,
+                variant_mode=variant_mode,
+                llm_policy=llm_policy,
+                max_retries=max_retries,
+                backoff_base_seconds=backoff_base_seconds,
             )
-        if discovered_website and not company.website:
-            company.website = discovered_website
-
-        snippets: list[str] = []
-        if rag_enabled:
-            retrieval_query = _build_retrieval_query(company=company, dossier=dossier)
-            retrieval_embeddings = llm.embed_texts([retrieval_query])
-            if retrieval_embeddings:
-                search_results = store.search_knowledge_chunks(
-                    parent_slug=parent_slug,
-                    kind="marketing",
-                    query_embedding=retrieval_embeddings[0],
-                    top_k=6,
+        except RuntimeError as exc:
+            message = str(exc)
+            if llm_policy == "strict" and ("LLM fatal error" in message or "LLM unavailable" in message):
+                return _RowOutcome(
+                    row_index=row_index,
+                    export_row={},
+                    result=None,
+                    extra_payload={"used_llm": used_llm, "template_only": template_only},
+                    warning=True,
+                    failed=True,
+                    fatal_error=True,
+                    error_message=message,
                 )
-                snippets = [str(item.get("content") or "") for item in search_results if item.get("content")]
 
-        variants, recommended_variant, global_flags = llm.generate_campaign_variants(
-            parent=parent,
-            company=company,
-            contact=primary_contact,
-            dossier=dossier,
-            marketing_snippets=snippets,
-            variant_mode=variant_mode,
-            llm_policy=llm_policy,
-            max_retries=max_retries,
-            backoff_base_seconds=backoff_base_seconds,
-        )
-    except RuntimeError as exc:
-        message = str(exc)
-        if llm_policy == "strict" and (
-            "LLM fatal error" in message or "LLM unavailable" in message
-        ):
+            error_code = "FAILED_LLM_RETRY_EXHAUSTED"
+            export_row = _error_row(
+                campaign_id=campaign_id,
+                parent_slug=parent_slug,
+                raw_row=raw_row,
+                error_code=error_code,
+                warning_message=message,
+                output_schema=output_schema,
+            )
             return _RowOutcome(
                 row_index=row_index,
-                export_row={},
+                export_row=export_row,
                 result=None,
-                extra_payload={},
+                extra_payload={"used_llm": used_llm, "template_only": template_only},
                 warning=True,
                 failed=True,
-                fatal_error=True,
+                fatal_error=False,
                 error_message=message,
             )
-
-        error_code = "FAILED_LLM_RETRY_EXHAUSTED"
-        export_row = _error_row(
-            campaign_id=campaign_id,
-            parent_slug=parent_slug,
-            raw_row=raw_row,
-            error_code=error_code,
-            warning_message=message,
-            output_schema=output_schema,
-        )
-        return _RowOutcome(
-            row_index=row_index,
-            export_row=export_row,
-            result=None,
-            extra_payload={},
-            warning=True,
-            failed=True,
-            fatal_error=False,
-            error_message=message,
-        )
 
     all_flags = sorted(set(global_flags + [flag for v in variants for flag in v.risk_flags]))
     warning = bool(all_flags) or not dossier.sources
@@ -475,7 +519,7 @@ def _process_company_like_item(
     final_body = str(by_name.get(selected_variant, {}).get("body") or "")
     generation_status = "OK"
     error_code = ""
-    generation_warning = ""
+    generation_warning = template_warning
     if any("failed_copy_guard" in flag for flag in all_flags):
         generation_status = "FAILED_COPY_GUARD"
         error_code = "FAILED_COPY_GUARD"
@@ -511,6 +555,8 @@ def _process_company_like_item(
         "generation_status": generation_status,
         "generation_warning": generation_warning,
         "error_code": error_code,
+        "used_llm": used_llm,
+        "template_only": template_only,
         "raw_row": raw_row,
     }
     return _RowOutcome(
@@ -545,9 +591,34 @@ def _resolve_export_schema(*, output_schema: str, summary: dict[str, object]) ->
             return maybe
     return "ab"
 
+def _row_has_valid_website(row: dict[str, str]) -> bool:
+    website = (row.get("Company Website Full") or "").strip()
+    if not website:
+        return False
+    parsed = urlparse(website)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if not parsed.netloc:
+        return False
+    return True
 
-def _estimate_cost_eur(rows_valid: int) -> float:
-    estimated = rows_valid * 0.05
+
+def _estimate_llm_items_planned(*, preflight, recipient_mode: str) -> int:
+    mode = (recipient_mode or "row").lower()
+    if mode == "row":
+        return sum(1 for item in preflight.rows if item.is_valid and _row_has_valid_website(item.row))
+
+    valid_rows = [item.row for item in preflight.rows if item.is_valid]
+    groups = group_rows_by_company(valid_rows)
+    planned = 0
+    for company_rows in groups.values():
+        if any(_row_has_valid_website(row) for row in company_rows):
+            planned += 1
+    return planned
+
+
+def _estimate_cost_eur(llm_items: int) -> float:
+    estimated = llm_items * 0.05
     return round(estimated, 2)
 
 
@@ -570,6 +641,18 @@ def _minimal_dossier(*, company_name: str) -> EnrichmentDossier:
         evidence=["Fonte primaria: CSV lead"],
         sources=["csv://lead-row"],
     )
+
+
+def _template_only_subject(*, company, contact) -> str:
+    first_name = ""
+    if contact and getattr(contact, "full_name", ""):
+        first_name = str(contact.full_name).split()[0].strip()
+    if first_name:
+        subject = f"{first_name}, contributi a fondo perduto per {company.company_name}"
+    else:
+        subject = f"Contributi a fondo perduto per {company.company_name}"
+    subject = " ".join(subject.split())
+    return subject[:90].rstrip()
 
 
 def _build_retrieval_query(*, company, dossier) -> str:

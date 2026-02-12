@@ -505,7 +505,7 @@ def _fallback_subject(*, company: LeadCompany, contact: LeadContact | None) -> s
     return f"Opportunita concrete per {company.company_name}"
 
 
-def _render_seed_template(parent: ParentProfile, company: LeadCompany, contact: LeadContact | None) -> str:
+def render_seed_template(parent: ParentProfile, company: LeadCompany, contact: LeadContact | None) -> str:
     first_name = _contact_first_name(contact) or "tu"
     template = parent.outreach_seed_template or ""
     replacements = {
@@ -521,6 +521,11 @@ def _render_seed_template(parent: ParentProfile, company: LeadCompany, contact: 
     for key, value in replacements.items():
         rendered = rendered.replace(key, value)
     return rendered.strip()
+
+
+def _render_seed_template(parent: ParentProfile, company: LeadCompany, contact: LeadContact | None) -> str:
+    # Back-compat internal name used across the codebase.
+    return render_seed_template(parent, company, contact)
 
 
 def _contact_first_name(contact: LeadContact | None) -> str:

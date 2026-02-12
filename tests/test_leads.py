@@ -165,8 +165,8 @@ class LeadTests(unittest.TestCase):
 
             preflight = preflight_leads(detailed)
             self.assertEqual(preflight.rows_total, 2)
-            self.assertEqual(preflight.rows_valid, 1)
-            self.assertEqual(preflight.rows_skipped, 1)
+            self.assertEqual(preflight.rows_valid, 2)
+            self.assertEqual(preflight.rows_skipped, 0)
 
 
 if __name__ == "__main__":

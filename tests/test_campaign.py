@@ -155,8 +155,8 @@ class CampaignTests(unittest.TestCase):
             )
 
             self.assertEqual(summary.rows_total, 3)
-            self.assertEqual(summary.rows_valid, 2)
-            self.assertEqual(summary.rows_skipped, 1)
+            self.assertEqual(summary.rows_valid, 3)
+            self.assertEqual(summary.rows_skipped, 0)
             self.assertEqual(len(rows), 3)
 
             with export_path.open("r", encoding="utf-8", newline="") as handle:
@@ -166,8 +166,12 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(len(exported), 3)
             self.assertIn("Email", exported[0])
             self.assertIn("final_subject", exported[0])
-            skipped_rows = [item for item in exported if item.get("generation_status") == "SKIPPED_VALIDATION"]
-            self.assertEqual(len(skipped_rows), 1)
+            template_only_rows = [
+                item for item in exported if "template_only_no_website" in (item.get("risk_flags") or "")
+            ]
+            self.assertEqual(len(template_only_rows), 1)
+            self.assertTrue(template_only_rows[0].get("final_subject"))
+            self.assertTrue(template_only_rows[0].get("final_body"))
 
     def test_output_schema_abc_contains_variant_c_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
