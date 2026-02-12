@@ -15,6 +15,7 @@ async def build_enrichment_dossier(
     contact: LeadContact | None,
     headless: bool = True,
     max_extra_pages: int = 2,
+    snapshot_timeout_ms: int = 45000,
 ) -> tuple[EnrichmentDossier, str | None]:
     website = company.website
     city = _guess_city(company.location)
@@ -40,7 +41,11 @@ async def build_enrichment_dossier(
 
     if website:
         try:
-            snapshot = await fetch_website_snapshot(url=website, headless=headless)
+            snapshot = await fetch_website_snapshot(
+                url=website,
+                headless=headless,
+                timeout_ms=snapshot_timeout_ms,
+            )
             site_summary = snapshot.text_excerpt[:1200]
             sources.append(snapshot.url)
             evidence.append(f"Homepage title: {snapshot.title}")
@@ -48,7 +53,11 @@ async def build_enrichment_dossier(
             extra_urls = _pick_informative_links(snapshot.links, base_url=website, limit=max_extra_pages)
             for extra_url in extra_urls:
                 try:
-                    extra_snapshot = await fetch_website_snapshot(url=extra_url, headless=headless)
+                    extra_snapshot = await fetch_website_snapshot(
+                        url=extra_url,
+                        headless=headless,
+                        timeout_ms=snapshot_timeout_ms,
+                    )
                     sources.append(extra_snapshot.url)
                     evidence.append(f"Pagina rilevata: {extra_snapshot.title}")
                     if len(site_summary) < 2200:
@@ -85,6 +94,7 @@ def build_enrichment_dossier_sync(
     contact: LeadContact | None,
     headless: bool = True,
     max_extra_pages: int = 2,
+    snapshot_timeout_ms: int = 45000,
 ) -> tuple[EnrichmentDossier, str | None]:
     return asyncio.run(
         build_enrichment_dossier(
@@ -92,6 +102,7 @@ def build_enrichment_dossier_sync(
             contact=contact,
             headless=headless,
             max_extra_pages=max_extra_pages,
+            snapshot_timeout_ms=snapshot_timeout_ms,
         )
     )
 

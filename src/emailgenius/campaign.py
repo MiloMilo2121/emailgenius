@@ -123,6 +123,7 @@ def run_campaign(
             rag_enabled=rag_enabled,
             effective_enrichment_mode=effective_enrichment_mode,
             headless=headless,
+            recipient_mode=recipient_mode,
             max_concurrency=max_concurrency,
             max_retries=max_retries,
             backoff_base_seconds=backoff_base_seconds,
@@ -175,6 +176,7 @@ def run_campaign(
                 rag_enabled=rag_enabled,
                 effective_enrichment_mode=effective_enrichment_mode,
                 headless=headless,
+                recipient_mode=recipient_mode,
                 max_retries=max_retries,
                 backoff_base_seconds=backoff_base_seconds,
                 output_schema=output_schema,
@@ -418,6 +420,7 @@ def _run_row_mode(
     rag_enabled: bool,
     effective_enrichment_mode: str,
     headless: bool,
+    recipient_mode: str,
     max_concurrency: int,
     max_retries: int,
     backoff_base_seconds: float,
@@ -447,6 +450,7 @@ def _run_row_mode(
                 rag_enabled=rag_enabled,
                 effective_enrichment_mode=effective_enrichment_mode,
                 headless=headless,
+                recipient_mode=recipient_mode,
                 max_retries=max_retries,
                 backoff_base_seconds=backoff_base_seconds,
                 output_schema=output_schema,
@@ -481,6 +485,7 @@ def _process_company_like_item(
     rag_enabled: bool,
     effective_enrichment_mode: str,
     headless: bool,
+    recipient_mode: str,
     max_retries: int,
     backoff_base_seconds: float,
     output_schema: str,
@@ -534,11 +539,14 @@ def _process_company_like_item(
                 dossier = _minimal_dossier(company_name=company.company_name)
                 discovered_website = company.website
             else:
+                extra_pages = 0 if recipient_mode == "row" else 2
+                snapshot_timeout_ms = 18000 if recipient_mode == "row" else 45000
                 dossier, discovered_website = build_enrichment_dossier_sync(
                     company=company,
                     contact=primary_contact,
                     headless=headless,
-                    max_extra_pages=2,
+                    max_extra_pages=extra_pages,
+                    snapshot_timeout_ms=snapshot_timeout_ms,
                 )
             if discovered_website and not company.website:
                 company.website = discovered_website
