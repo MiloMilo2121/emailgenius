@@ -218,6 +218,10 @@ class LLMGateway:
                     "no_artificial_urgency": True,
                     "no_clickbait_subject": True,
                 },
+                "subject_line": {
+                    "max_words": 9,
+                    "max_chars": 70,
+                },
                 "formatting": {
                     "short_paragraphs": True,
                     "blank_line_between_paragraphs": True,
@@ -238,6 +242,7 @@ class LLMGateway:
             "B con riscrittura ampia ma controllata (50-60%), C intermedia quando richiesta. "
             "Personalizza solo incipit, riferimento ruolo/azienda, micro-angolo valore e subject. "
             "Evita toni spam, clickbait, urgenza artificiale, MAIUSCOLO aggressivo, claim assoluti/non verificabili. "
+            "Oggetto: specifico e corto (idealmente <= 70 caratteri, <= 9 parole). "
             "Formato: paragrafi brevi (1-2 frasi), una riga vuota tra paragrafi e tra blocchi tematici; "
             "non andare a capo manualmente dentro un paragrafo; firma come blocco finale separato. "
             "Se devi elencare piu di 3 elementi, usa bullet '-' (una voce per riga) con una riga vuota prima e dopo il blocco. "
@@ -607,7 +612,7 @@ def _quality_gate_flags(
     if any(token in subject_l for token in clickbait_tokens):
         flags.append("spam_clickbait_subject")
 
-    if len(subject.strip()) > 90:
+    if len(subject.strip()) > 70:
         flags.append("subject_too_long")
 
     # Encourage scan-friendly formatting: enough whitespace between thematic blocks.

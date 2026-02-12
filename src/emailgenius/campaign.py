@@ -768,7 +768,7 @@ def _template_only_subject(*, company, contact) -> str:
     else:
         subject = f"Contributi a fondo perduto per {company.company_name}"
     subject = " ".join(subject.split())
-    return subject[:90].rstrip()
+    return subject[:70].rstrip()
 
 
 def _build_retrieval_query(*, company, dossier) -> str:
