@@ -327,22 +327,30 @@ class PostgresStore:
                     (summary.status, summary_json, campaign_id),
                 )
 
-    def insert_campaign_company_result(self, result: CampaignCompanyResult) -> str:
+    def insert_campaign_company_result(
+        self,
+        result: CampaignCompanyResult,
+        *,
+        extra_payload: dict[str, object] | None = None,
+    ) -> str:
         record_id = str(uuid.uuid4())
-        payload = json.dumps(
-            {
-                "company": asdict(result.company),
-                "contact": asdict(result.contact) if result.contact else None,
-                "dossier": {
-                    **asdict(result.dossier),
-                    "news_items": [asdict(item) for item in result.dossier.news_items],
-                },
-                "variants": [asdict(item) for item in result.variants],
-                "recommended_variant": result.recommended_variant,
-                "approval": asdict(result.approval),
-                "risk_flags": result.risk_flags,
-                "created_at": utc_now_iso(),
+        payload_dict = {
+            "company": asdict(result.company),
+            "contact": asdict(result.contact) if result.contact else None,
+            "dossier": {
+                **asdict(result.dossier),
+                "news_items": [asdict(item) for item in result.dossier.news_items],
             },
+            "variants": [asdict(item) for item in result.variants],
+            "recommended_variant": result.recommended_variant,
+            "approval": asdict(result.approval),
+            "risk_flags": result.risk_flags,
+            "created_at": utc_now_iso(),
+        }
+        if extra_payload:
+            payload_dict.update(extra_payload)
+        payload = json.dumps(
+            payload_dict,
             ensure_ascii=False,
         )
         with self._connect() as conn:

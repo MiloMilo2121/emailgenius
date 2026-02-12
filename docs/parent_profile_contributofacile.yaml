@@ -1,0 +1,40 @@
+slug: contributo-facile
+company_name: Contributo Facile
+tone: formale-consulenziale
+offer_catalog:
+  - Accesso a contributi a fondo perduto
+  - Supporto pratiche di agevolazione
+icp:
+  - PMI Lombardia
+proof_points:
+  - 21 milioni di euro ottenuti per i partner nel 2024
+  - 92% di successo pratiche negli ultimi 5 anni
+objections:
+  - tempo limitato del management
+  - dubbi sui requisiti di accesso
+cta_policy: call conoscitiva 20-30 min
+no_go_claims:
+  - garantito
+  - senza rischi
+  - 100%
+compliance_notes:
+  - usare solo dati pubblici verificabili
+sender_name: Ivan Lorenzoni
+sender_company: Contributo Facile
+sender_phone: "+39 347 283 0680"
+sender_booking_url: "https://calendly.com/ivan-lorenzoni/preparere"
+outreach_seed_template: |
+  Si {{firstName}}, ci sono oltre 86.000 aziende, più o meno come la Tua, solo in Lombardia.
+  
+  Solo il 15% ha prospettive di espansione, sviluppo, crescita e miglioramento di utili e cashflow.
+  
+  Contributo Facile ha ottenuto per i propri partner 21 milioni di euro nel 2024, con il 92% di successo
+  delle domande presentate negli ultimi 5 anni.
+  
+  Se vuoi, possiamo fissare un incontro di circa 30 minuti per valutare in modo concreto i requisiti per
+  contributi a fondo perduto sui prossimi investimenti di {{company_name}}.
+  
+  {{sender_name}}
+  {{sender_company}}
+  {{sender_phone}}
+  {{sender_booking_url}}

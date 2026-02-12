@@ -7,8 +7,11 @@ from pathlib import Path
 
 from emailgenius.leads import (
     build_company_and_contacts,
+    format_header_mapping,
     group_rows_by_company,
+    preflight_leads,
     read_leads_csv,
+    read_leads_csv_detailed,
     select_primary_contact,
 )
 
@@ -124,6 +127,46 @@ class LeadTests(unittest.TestCase):
             rows = read_leads_csv(path)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["Company Name"], "Beta SRL")
+
+    def test_alias_header_mapping_and_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "leads-alias.csv"
+            headers = ["Email", "First Name", "Last Name", "companyName", "website", "jobTitle"]
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=headers)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "Email": "anna@example.com",
+                        "First Name": "Anna",
+                        "Last Name": "Verdi",
+                        "companyName": "Beta SRL",
+                        "website": "https://beta.it",
+                        "jobTitle": "Founder",
+                    }
+                )
+                writer.writerow(
+                    {
+                        "Email": "missing-website@example.com",
+                        "First Name": "Luca",
+                        "Last Name": "Rossi",
+                        "companyName": "Gamma SRL",
+                        "website": "",
+                        "jobTitle": "CEO",
+                    }
+                )
+
+            detailed = read_leads_csv_detailed(path)
+            self.assertEqual(detailed.rows[0]["Company Name"], "Beta SRL")
+            self.assertEqual(detailed.rows[0]["Company Website Full"], "https://beta.it")
+            self.assertEqual(detailed.rows[0]["Title"], "Founder")
+            mapping_text = format_header_mapping(detailed.header_mapping)
+            self.assertIn("Company Name <- companyName", mapping_text)
+
+            preflight = preflight_leads(detailed)
+            self.assertEqual(preflight.rows_total, 2)
+            self.assertEqual(preflight.rows_valid, 1)
+            self.assertEqual(preflight.rows_skipped, 1)
 
 
 if __name__ == "__main__":

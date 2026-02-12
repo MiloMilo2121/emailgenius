@@ -73,6 +73,45 @@ def build_parser() -> argparse.ArgumentParser:
     campaign_run.add_argument("--out-dir", default="reports/campaigns", help="Output directory")
     campaign_run.add_argument("--stages", default="all", help="Pipeline stages (default: all)")
     campaign_run.add_argument("--headful", action="store_true", help="Run browser in headed mode")
+    campaign_run.add_argument(
+        "--recipient-mode",
+        default="company",
+        choices=["company", "row"],
+        help="Recipient granularity: company (default) or row",
+    )
+    campaign_run.add_argument(
+        "--variant-mode",
+        default="ab",
+        choices=["ab", "abc"],
+        help="Generated variant set",
+    )
+    campaign_run.add_argument(
+        "--output-schema",
+        default="ab",
+        choices=["ab", "abc"],
+        help="Output schema used for CSV/sheet",
+    )
+    campaign_run.add_argument(
+        "--llm-policy",
+        default="strict",
+        choices=["strict", "fallback"],
+        help="LLM error policy",
+    )
+    campaign_run.add_argument(
+        "--enrichment-mode",
+        default="auto",
+        choices=["auto", "minimal", "hybrid", "web"],
+        help="Enrichment intensity",
+    )
+    campaign_run.add_argument("--max-concurrency", type=int, default=5, help="Max concurrent workers")
+    campaign_run.add_argument("--max-retries", type=int, default=3, help="Retries for transient LLM errors")
+    campaign_run.add_argument("--backoff-base-seconds", type=float, default=1.0, help="Exponential backoff base")
+    campaign_run.add_argument("--cost-cap-eur", type=float, default=50.0, help="Pre-run cost cap")
+    campaign_run.add_argument(
+        "--force-cost-override",
+        action="store_true",
+        help="Force run even when estimated cost exceeds cap",
+    )
 
     campaign_status_parser = campaign_sub.add_parser("status", help="Campaign status")
     campaign_status_parser.add_argument("--campaign-id", required=True, help="Campaign id")
@@ -81,6 +120,12 @@ def build_parser() -> argparse.ArgumentParser:
     campaign_export_parser.add_argument("--campaign-id", required=True, help="Campaign id")
     campaign_export_parser.add_argument("--format", default="csv", choices=["csv"], help="Export format")
     campaign_export_parser.add_argument("--out", required=True, help="Output path")
+    campaign_export_parser.add_argument(
+        "--output-schema",
+        default="auto",
+        choices=["auto", "ab", "abc"],
+        help="Export schema",
+    )
 
     return parser
 
@@ -256,10 +301,29 @@ def main() -> int:
                 sheet_id=args.sheet_id,
                 stages=args.stages,
                 headless=not args.headful,
+                recipient_mode=args.recipient_mode,
+                variant_mode=args.variant_mode,
+                output_schema=args.output_schema,
+                llm_policy=args.llm_policy,
+                enrichment_mode=args.enrichment_mode,
+                max_concurrency=args.max_concurrency,
+                max_retries=args.max_retries,
+                backoff_base_seconds=args.backoff_base_seconds,
+                cost_cap_eur=args.cost_cap_eur,
+                force_cost_override=args.force_cost_override,
             )
             print(f"Campaign completed: {summary.campaign_id}")
             print(f"Companies: {summary.companies_total} | generated: {summary.generated_total} | warnings: {summary.warnings_total}")
             print(f"Local export: {export_path}")
+            print(
+                "Rows: "
+                f"total={summary.rows_total} valid={summary.rows_valid} skipped={summary.rows_skipped} "
+                f"ok={summary.rows_generated_ok} failed={summary.rows_failed}"
+            )
+            print(
+                "Costs: "
+                f"estimated={summary.estimated_cost_eur:.2f} EUR actual={summary.actual_cost_eur:.2f} EUR"
+            )
             return 0
 
         if args.campaign_command == "status":
@@ -271,7 +335,7 @@ def main() -> int:
             return 0
 
         if args.campaign_command == "export":
-            output_path = export_campaign(store, args.campaign_id, args.out)
+            output_path = export_campaign(store, args.campaign_id, args.out, output_schema=args.output_schema)
             print(f"Campaign exported: {output_path}")
             return 0
 

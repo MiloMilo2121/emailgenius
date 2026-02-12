@@ -20,6 +20,14 @@ REQUIRED_KEYS = {
     "compliance_notes",
 }
 
+DEFAULT_OUTREACH_SEED_TEMPLATE = (
+    "Ciao {{first_name}},\n\n"
+    "scrivo per condividere una valutazione preliminare utile per {{company_name}}.\n\n"
+    "Se vuoi, possiamo sentirci 20-30 minuti per capire se ci sono margini reali di miglioramento.\n\n"
+    "{{sender_name}}\n"
+    "{{sender_company}}"
+)
+
 
 def load_parent_profile(profile_path: str | Path, *, slug_override: str | None = None) -> ParentProfile:
     path = Path(profile_path)
@@ -45,6 +53,11 @@ def load_parent_profile(profile_path: str | Path, *, slug_override: str | None =
         cta_policy=str(payload.get("cta_policy") or "call conoscitiva 20-30 min").strip(),
         no_go_claims=ensure_list(payload.get("no_go_claims")),
         compliance_notes=ensure_list(payload.get("compliance_notes")),
+        sender_name=str(payload.get("sender_name") or payload["company_name"]).strip(),
+        sender_company=str(payload.get("sender_company") or payload["company_name"]).strip() or None,
+        sender_phone=str(payload.get("sender_phone") or "").strip() or None,
+        sender_booking_url=str(payload.get("sender_booking_url") or "").strip() or None,
+        outreach_seed_template=str(payload.get("outreach_seed_template") or DEFAULT_OUTREACH_SEED_TEMPLATE).strip(),
     )
 
     _validate_parent_profile(profile)
@@ -62,6 +75,10 @@ def _validate_parent_profile(profile: ParentProfile) -> None:
         raise ValueError("icp cannot be empty")
     if not profile.cta_policy:
         raise ValueError("cta_policy cannot be empty")
+    if not profile.sender_name:
+        raise ValueError("sender_name cannot be empty")
+    if not profile.outreach_seed_template:
+        raise ValueError("outreach_seed_template cannot be empty")
 
 
 def parent_profile_to_dict(profile: ParentProfile) -> dict[str, object]:
@@ -76,6 +93,11 @@ def parent_profile_to_dict(profile: ParentProfile) -> dict[str, object]:
         "cta_policy": profile.cta_policy,
         "no_go_claims": profile.no_go_claims,
         "compliance_notes": profile.compliance_notes,
+        "sender_name": profile.sender_name,
+        "sender_company": profile.sender_company,
+        "sender_phone": profile.sender_phone,
+        "sender_booking_url": profile.sender_booking_url,
+        "outreach_seed_template": profile.outreach_seed_template,
     }
 
 
@@ -91,4 +113,9 @@ def parent_profile_from_dict(payload: dict[str, object]) -> ParentProfile:
         cta_policy=str(payload.get("cta_policy") or "call conoscitiva 20-30 min"),
         no_go_claims=ensure_list(payload.get("no_go_claims")),
         compliance_notes=ensure_list(payload.get("compliance_notes")),
+        sender_name=str(payload.get("sender_name") or payload.get("company_name") or "").strip(),
+        sender_company=str(payload.get("sender_company") or payload.get("company_name") or "").strip() or None,
+        sender_phone=str(payload.get("sender_phone") or "").strip() or None,
+        sender_booking_url=str(payload.get("sender_booking_url") or "").strip() or None,
+        outreach_seed_template=str(payload.get("outreach_seed_template") or DEFAULT_OUTREACH_SEED_TEMPLATE).strip(),
     )

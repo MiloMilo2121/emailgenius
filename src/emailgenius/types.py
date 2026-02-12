@@ -72,6 +72,11 @@ class ParentProfile:
     cta_policy: str = "call conoscitiva 20-30 min"
     no_go_claims: list[str] = field(default_factory=list)
     compliance_notes: list[str] = field(default_factory=list)
+    sender_name: str = ""
+    sender_company: str | None = None
+    sender_phone: str | None = None
+    sender_booking_url: str | None = None
+    outreach_seed_template: str = ""
 
 
 @dataclass(slots=True)
@@ -155,6 +160,17 @@ class CampaignSummary:
     companies_total: int
     generated_total: int
     warnings_total: int
+    recipient_mode: str = "company"
+    variant_mode: str = "ab"
+    output_schema: str = "ab"
+    llm_policy: str = "strict"
+    rows_total: int = 0
+    rows_valid: int = 0
+    rows_skipped: int = 0
+    rows_generated_ok: int = 0
+    rows_failed: int = 0
+    estimated_cost_eur: float = 0.0
+    actual_cost_eur: float = 0.0
 
 
 JsonDict = dict[str, Any]
