@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from emailgenius.llm import LLMGateway
+from emailgenius.llm import _coerce_variants_raw
 from emailgenius.types import EnrichmentDossier, LeadCompany, LeadContact, ParentProfile
 
 
@@ -115,6 +116,16 @@ class LLMFallbackTests(unittest.TestCase):
         self.assertEqual(len(variants), 2)
         self.assertIn(recommended, {"A", "B"})
         self.assertIsInstance(flags, list)
+
+    def test_coerce_variants_raw_accepts_dict_mapping(self) -> None:
+        raw = {
+            "A": {"subject": "sa", "body": "ba"},
+            "B": {"subject": "sb", "body": "bb"},
+        }
+        coerced = _coerce_variants_raw(raw, preferred_order=["A", "B"])
+        self.assertEqual(len(coerced), 2)
+        self.assertEqual(coerced[0].get("variant"), "A")
+        self.assertEqual(coerced[1].get("variant"), "B")
 
 
 if __name__ == "__main__":

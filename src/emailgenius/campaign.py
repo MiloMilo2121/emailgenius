@@ -92,6 +92,7 @@ def run_campaign(
         recipient_mode=recipient_mode,
         enrichment_mode=enrichment_mode,
     )
+    rag_enabled = bool(config.openai_api_key)
 
     campaign_id = store.create_campaign(parent_slug=parent_slug, leads_file=leads_csv_path, sheet_id=sheet_id)
     all_columns = _merge_columns(preflight.input_columns, approval_columns(output_schema))
@@ -111,6 +112,7 @@ def run_campaign(
             llm=llm,
             variant_mode=variant_mode,
             llm_policy=llm_policy,
+            rag_enabled=rag_enabled,
             effective_enrichment_mode=effective_enrichment_mode,
             headless=headless,
             max_concurrency=max_concurrency,
@@ -160,6 +162,7 @@ def run_campaign(
                 llm=llm,
                 variant_mode=variant_mode,
                 llm_policy=llm_policy,
+                rag_enabled=rag_enabled,
                 effective_enrichment_mode=effective_enrichment_mode,
                 headless=headless,
                 max_retries=max_retries,
@@ -313,6 +316,7 @@ def _run_row_mode(
     llm: LLMGateway,
     variant_mode: str,
     llm_policy: str,
+    rag_enabled: bool,
     effective_enrichment_mode: str,
     headless: bool,
     max_concurrency: int,
@@ -326,6 +330,8 @@ def _run_row_mode(
 
     outcomes: list[_RowOutcome] = []
     workers = max(1, int(max_concurrency))
+    total = len(valid_rows)
+    done = 0
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
             executor.submit(
@@ -339,6 +345,7 @@ def _run_row_mode(
                 llm=llm,
                 variant_mode=variant_mode,
                 llm_policy=llm_policy,
+                rag_enabled=rag_enabled,
                 effective_enrichment_mode=effective_enrichment_mode,
                 headless=headless,
                 max_retries=max_retries,
@@ -351,6 +358,9 @@ def _run_row_mode(
         for future in as_completed(futures):
             outcome = future.result()
             outcomes.append(outcome)
+            done += 1
+            if done % 10 == 0 or done == total:
+                print(f"[progress] generated {done}/{total}")
             if outcome.fatal_error:
                 for pending in futures:
                     pending.cancel()
@@ -369,6 +379,7 @@ def _process_company_like_item(
     llm: LLMGateway,
     variant_mode: str,
     llm_policy: str,
+    rag_enabled: bool,
     effective_enrichment_mode: str,
     headless: bool,
     max_retries: int,
@@ -394,7 +405,7 @@ def _process_company_like_item(
             company.website = discovered_website
 
         snippets: list[str] = []
-        if effective_enrichment_mode in {"hybrid", "web"}:
+        if rag_enabled:
             retrieval_query = _build_retrieval_query(company=company, dossier=dossier)
             retrieval_embeddings = llm.embed_texts([retrieval_query])
             if retrieval_embeddings:
@@ -419,7 +430,9 @@ def _process_company_like_item(
         )
     except RuntimeError as exc:
         message = str(exc)
-        if llm_policy == "strict" and "LLM fatal error" in message:
+        if llm_policy == "strict" and (
+            "LLM fatal error" in message or "LLM unavailable" in message
+        ):
             return _RowOutcome(
                 row_index=row_index,
                 export_row={},

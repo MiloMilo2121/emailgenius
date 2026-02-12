@@ -22,12 +22,98 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, value))
 
 
+def _rewrite_targets_for_variants(variant_names: list[str]) -> dict[str, tuple[float, float]]:
+    defaults = {
+        "A": (0.25, 0.30),
+        "B": (0.50, 0.60),
+        "C": (0.35, 0.45),
+    }
+    out: dict[str, tuple[float, float]] = {}
+    for name in variant_names:
+        out[name] = defaults.get(name.upper(), (0.25, 0.40))
+    return out
+
+
+def _coerce_variants_raw(value: object, *, preferred_order: list[str]) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return []
+        return _coerce_variants_raw(parsed, preferred_order=preferred_order)
+
+    if isinstance(value, list):
+        out: list[dict[str, Any]] = []
+        for item in value:
+            if isinstance(item, dict):
+                out.append(item)
+                continue
+            if isinstance(item, str):
+                # Some models may emit array of JSON strings or plain bodies.
+                try:
+                    parsed = json.loads(item)
+                except Exception:
+                    out.append({"body": item})
+                    continue
+                if isinstance(parsed, dict):
+                    out.append(parsed)
+        return out
+
+    if isinstance(value, dict):
+        # If it's already a single-variant object.
+        if any(key in value for key in ("variant", "subject", "body", "cta")):
+            return [value]
+
+        # Otherwise treat as map { "A": {...}, "B": {...} } or similar.
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def _push(name: str, payload: object) -> None:
+            key = name.strip().upper()
+            if not key or key in seen:
+                return
+            seen.add(key)
+            if isinstance(payload, dict):
+                item = dict(payload)
+                item.setdefault("variant", key)
+                out.append(item)
+                return
+            if isinstance(payload, str):
+                out.append({"variant": key, "body": payload})
+                return
+            out.append({"variant": key})
+
+        for key in preferred_order:
+            if key in value:
+                _push(key, value.get(key))
+        for key, payload in value.items():
+            if str(key).upper() in seen:
+                continue
+            _push(str(key), payload)
+        return out
+
+    return []
+
+
 class LLMGateway:
     def __init__(self, *, api_key: str | None, chat_model: str, embedding_model: str) -> None:
         self._api_key = api_key
         self._chat_model = chat_model
         self._embedding_model = embedding_model
-        self._client = OpenAI(api_key=api_key) if (api_key and OpenAI is not None) else None
+        self._chat_timeout_s = 90.0
+        self._embedding_timeout_s = 45.0
+        self._client = (
+            OpenAI(
+                api_key=api_key,
+                timeout=self._chat_timeout_s,
+                max_retries=0,
+            )
+            if (api_key and OpenAI is not None)
+            else None
+        )
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
@@ -37,7 +123,11 @@ class LLMGateway:
             return [_hash_embedding(text) for text in texts]
 
         try:
-            response = self._client.embeddings.create(model=self._embedding_model, input=texts)
+            response = self._client.embeddings.create(
+                model=self._embedding_model,
+                input=texts,
+                timeout=self._embedding_timeout_s,
+            )
             return [item.embedding for item in response.data]
         except Exception:
             return [_hash_embedding(text) for text in texts]
@@ -56,6 +146,7 @@ class LLMGateway:
         backoff_base_seconds: float = 1.0,
     ) -> tuple[list[DraftEmailVariant], str, list[str]]:
         requested_variants = _variant_names_for_mode(variant_mode)
+        rewrite_targets = _rewrite_targets_for_variants(requested_variants)
         if self._client is None:
             if llm_policy == "strict":
                 raise RuntimeError("LLM unavailable: configure OPENAI_API_KEY or set --llm-policy fallback")
@@ -65,6 +156,7 @@ class LLMGateway:
                 contact=contact,
                 dossier=dossier,
                 variant_names=requested_variants,
+                rewrite_targets=rewrite_targets,
             )
 
         payload = {
@@ -81,8 +173,14 @@ class LLMGateway:
                 "language": "italiano",
                 "tone": parent.tone,
                 "variants_required": requested_variants,
-                "rewrite_budget_max_pct": 30,
-                "rewrite_budget_target_pct_range": "20-30",
+                "rewrite_budget_per_variant": {
+                    name: {
+                        "target_range_pct": f"{int(bounds[0] * 100)}-{int(bounds[1] * 100)}",
+                        "min_pct": int(bounds[0] * 100),
+                        "max_pct": int(bounds[1] * 100),
+                    }
+                    for name, bounds in rewrite_targets.items()
+                },
                 "keep_seed_structure": True,
                 "personalization_scope": [
                     "incipit",
@@ -103,8 +201,9 @@ class LLMGateway:
 
         system_prompt = (
             "Sei un copywriter B2B senior in italiano. "
-            "Devi rispettare in modo rigido il seed template e mantenerne la struttura complessiva, "
-            "limitando la riscrittura al 20-30%. "
+            "Devi rispettare in modo rigido il seed template e mantenerne la struttura complessiva. "
+            "Applica budget diversi per variante: A con riscrittura contenuta (25-30%), "
+            "B con riscrittura ampia ma controllata (50-60%), C intermedia quando richiesta. "
             "Personalizza solo incipit, riferimento ruolo/azienda, micro-angolo valore e subject. "
             "Evita toni spam, clickbait, urgenza artificiale, MAIUSCOLO aggressivo, claim assoluti/non verificabili. "
             "Output SOLO JSON valido con chiavi: variants, recommended_variant, quality_notes."
@@ -115,7 +214,7 @@ class LLMGateway:
         while attempt <= max_retries:
             try:
                 parsed = self._call_chat_json(system_prompt=system_prompt, user_prompt=user_prompt)
-                variants_raw = parsed.get("variants", [])
+                variants_raw = _coerce_variants_raw(parsed.get("variants", []), preferred_order=requested_variants)
                 recommended = str(parsed.get("recommended_variant") or requested_variants[0]).upper()
 
                 variants: list[DraftEmailVariant] = []
@@ -139,6 +238,8 @@ class LLMGateway:
                         subject=subject,
                         body=body,
                         seed_template=parent.outreach_seed_template,
+                        variant_name=variant_name,
+                        rewrite_targets=rewrite_targets,
                     )
 
                     if quality_flags:
@@ -146,6 +247,8 @@ class LLMGateway:
                             seed_template=parent.outreach_seed_template,
                             subject=subject,
                             body=body,
+                            variant_name=variant_name,
+                            rewrite_targets=rewrite_targets,
                             quality_flags=quality_flags,
                         )
                         if repaired is not None:
@@ -154,6 +257,8 @@ class LLMGateway:
                                 subject=repaired_subject,
                                 body=repaired_body,
                                 seed_template=parent.outreach_seed_template,
+                                variant_name=variant_name,
+                                rewrite_targets=rewrite_targets,
                             )
                             if not repaired_flags:
                                 subject, body = repaired_subject, repaired_body
@@ -177,7 +282,15 @@ class LLMGateway:
                     )
                     global_flags.extend(all_flags)
 
-                variants = _ensure_variants(variants, parent, company, contact, dossier, requested_variants)
+                variants = _ensure_variants(
+                    variants,
+                    parent,
+                    company,
+                    contact,
+                    dossier,
+                    requested_variants,
+                    rewrite_targets,
+                )
                 recommended = _normalize_recommended(recommended, variants)
                 return variants, recommended, sorted(set(global_flags))
             except Exception as exc:
@@ -194,6 +307,7 @@ class LLMGateway:
                         contact=contact,
                         dossier=dossier,
                         variant_names=requested_variants,
+                        rewrite_targets=rewrite_targets,
                     )
 
                 sleep_s = backoff_base_seconds * (2**attempt)
@@ -208,6 +322,7 @@ class LLMGateway:
             contact=contact,
             dossier=dossier,
             variant_names=requested_variants,
+            rewrite_targets=rewrite_targets,
         )
 
     def _call_chat_json(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
@@ -220,6 +335,7 @@ class LLMGateway:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            timeout=self._chat_timeout_s,
         )
         raw_content = response.choices[0].message.content or "{}"
         parsed = json.loads(raw_content)
@@ -233,19 +349,27 @@ class LLMGateway:
         seed_template: str,
         subject: str,
         body: str,
+        variant_name: str,
+        rewrite_targets: dict[str, tuple[float, float]],
         quality_flags: list[str],
     ) -> tuple[str, str] | None:
         if self._client is None:
             return None
+        min_rewrite, max_rewrite = rewrite_targets.get(variant_name.upper(), (0.25, 0.40))
 
         repair_prompt = {
             "seed_template": seed_template,
             "candidate_subject": subject,
             "candidate_body": body,
+            "variant": variant_name.upper(),
+            "rewrite_target_pct": {
+                "min": int(min_rewrite * 100),
+                "max": int(max_rewrite * 100),
+            },
             "quality_flags": quality_flags,
             "instructions": [
                 "mantieni la struttura del seed template",
-                "riduci riscrittura al massimo 30%",
+                "rispetta il range di riscrittura richiesto per la variante",
                 "rimuovi pattern spam/clickbait",
                 "mantieni tono business-safe",
             ],
@@ -289,6 +413,7 @@ def _ensure_variants(
     contact: LeadContact | None,
     dossier: EnrichmentDossier,
     requested_variants: list[str],
+    rewrite_targets: dict[str, tuple[float, float]],
 ) -> list[DraftEmailVariant]:
     names = {variant.variant for variant in variants}
     defaults, _, _ = _fallback_variants(
@@ -297,6 +422,7 @@ def _ensure_variants(
         contact=contact,
         dossier=dossier,
         variant_names=requested_variants,
+        rewrite_targets=rewrite_targets,
     )
     for fallback in defaults:
         if fallback.variant not in names:
@@ -312,6 +438,7 @@ def _fallback_variants(
     contact: LeadContact | None,
     dossier: EnrichmentDossier,
     variant_names: list[str],
+    rewrite_targets: dict[str, tuple[float, float]],
 ) -> tuple[list[DraftEmailVariant], str, list[str]]:
     rendered = _render_seed_template(parent, company, contact)
     contact_name = contact.full_name if contact and contact.full_name else "Team"
@@ -321,7 +448,16 @@ def _fallback_variants(
 
     templates = {
         "A": rendered,
-        "B": rendered.replace("Ti", "Le").replace("Tuo", "vostro").replace("Tua", "vostra"),
+        "B": (
+            f"Ciao {contact_name},\n\n"
+            f"ti propongo un confronto rapido su {company.company_name}. "
+            "Molte aziende simili stanno finanziando investimenti con contributi che riducono "
+            "l'esborso iniziale e liberano cassa operativa.\n\n"
+            "Possiamo verificare insieme se nel tuo caso ci sono opportunita concrete, "
+            "con un'analisi mirata ai prossimi investimenti e alle priorita reali del business.\n\n"
+            f"{parent.sender_name or parent.company_name}\n"
+            f"{parent.sender_company or parent.company_name}"
+        ),
         "C": (
             f"Ciao {contact_name},\n\n"
             f"partendo da informazioni pubbliche su {company.company_name}, "
@@ -342,6 +478,8 @@ def _fallback_variants(
             subject=subject_line.replace("Oggetto:", "").strip(),
             body=body_text.strip(),
             seed_template=parent.outreach_seed_template,
+            variant_name=name,
+            rewrite_targets=rewrite_targets,
         )
         all_flags = sorted(set(flags + quality_flags))
         variants.append(
@@ -391,7 +529,14 @@ def _contact_first_name(contact: LeadContact | None) -> str:
     return contact.full_name.split()[0].strip()
 
 
-def _quality_gate_flags(*, subject: str, body: str, seed_template: str) -> list[str]:
+def _quality_gate_flags(
+    *,
+    subject: str,
+    body: str,
+    seed_template: str,
+    variant_name: str,
+    rewrite_targets: dict[str, tuple[float, float]],
+) -> list[str]:
     flags: list[str] = []
     combined = f"{subject}\n{body}"
     all_caps_words = re.findall(r"\b[A-Z]{5,}\b", combined)
@@ -414,8 +559,13 @@ def _quality_gate_flags(*, subject: str, body: str, seed_template: str) -> list[
     norm_body = _normalize_similarity_text(body)
     if norm_seed and norm_body:
         similarity = SequenceMatcher(a=norm_seed[:2400], b=norm_body[:2400]).ratio()
-        if similarity < 0.65:
-            flags.append("rewrite_budget_exceeded")
+        rewrite_ratio = 1.0 - similarity
+        min_rewrite, max_rewrite = rewrite_targets.get(variant_name.upper(), (0.25, 0.40))
+        tolerance = 0.08
+        if rewrite_ratio < max(0.0, min_rewrite - tolerance):
+            flags.append("rewrite_under_target")
+        if rewrite_ratio > min(1.0, max_rewrite + tolerance):
+            flags.append("rewrite_over_target")
 
     return sorted(set(flags))
 
