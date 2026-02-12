@@ -620,6 +620,17 @@ def _quality_gate_flags(
     if len(normalized_body) > 240 and normalized_body.count("\n\n") < 2:
         flags.append("format_needs_whitespace")
 
+    # Detect old-school manual line wrapping (ragged plaintext) and ask the repair pass to reflow.
+    raw_lines = [line.strip() for line in (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    non_empty_lines = [line for line in raw_lines if line]
+    if non_empty_lines and len(non_empty_lines) >= 12 and normalized_body.count("\n\n") < 2:
+        bullet_markers = ("-", "*", "+", "•")
+        bulletish = sum(1 for line in non_empty_lines if line.startswith(bullet_markers))
+        if bulletish / max(len(non_empty_lines), 1) < 0.30:
+            avg_len = sum(len(line) for line in non_empty_lines) / len(non_empty_lines)
+            if avg_len < 70:
+                flags.append("format_manual_wrap")
+
     norm_seed = _normalize_similarity_text(seed_template)
     norm_body = _normalize_similarity_text(body)
     if norm_seed and norm_body:
