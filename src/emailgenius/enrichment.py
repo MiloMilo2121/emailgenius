@@ -116,6 +116,8 @@ def _guess_city(location: str | None) -> str:
 def _pick_informative_links(links: list[str], *, base_url: str, limit: int) -> list[str]:
     if not links:
         return []
+    if limit <= 0:
+        return []
 
     host = urlparse(base_url).netloc.lower().replace("www.", "")
     keywords = (
