@@ -270,46 +270,101 @@ def export_campaign(store: PostgresStore, campaign_id: str, output_path: str, ou
     records = store.list_campaign_records(campaign_id)
     summary = store.get_campaign_summary(campaign_id) or {}
     resolved_schema = _resolve_export_schema(output_schema=output_schema, summary=summary)
-    columns = approval_columns(resolved_schema)
+    approval_cols = approval_columns(resolved_schema)
 
     rows: list[dict[str, object]] = []
+    raw_columns: list[str] = []
     for record in records:
         payload = record.get("payload_json") or {}
         variants = payload.get("variants") if isinstance(payload, dict) else []
         by_name = {str(item.get("variant")).upper(): item for item in variants if isinstance(item, dict)}
-        selected_variant = str(payload.get("selected_variant") or payload.get("recommended_variant") or "A").upper()
 
-        row = {
-            "campaign_id": campaign_id,
-            "parent_slug": record.get("parent_slug") or "",
-            "company_name": record.get("company_name") or "",
-            "contact_name": record.get("contact_name") or "",
-            "contact_title": record.get("contact_title") or "",
-            "contact_email": record.get("contact_email") or "",
-            "variant_a_subject": by_name.get("A", {}).get("subject", ""),
-            "variant_a_body": by_name.get("A", {}).get("body", ""),
-            "variant_b_subject": by_name.get("B", {}).get("subject", ""),
-            "variant_b_body": by_name.get("B", {}).get("body", ""),
-            "variant_c_subject": by_name.get("C", {}).get("subject", ""),
-            "variant_c_body": by_name.get("C", {}).get("body", ""),
-            "recommended_variant": payload.get("recommended_variant", ""),
-            "final_subject": by_name.get(selected_variant, {}).get("subject", ""),
-            "final_body": by_name.get(selected_variant, {}).get("body", ""),
-            "selected_variant": selected_variant,
-            "generation_status": payload.get("generation_status", "OK"),
-            "generation_warning": payload.get("generation_warning", ""),
-            "error_code": payload.get("error_code", ""),
-            "evidence_summary": "; ".join((payload.get("dossier", {}) or {}).get("evidence", [])[:5])
-            if isinstance(payload, dict)
-            else "",
-            "risk_flags": "; ".join(payload.get("risk_flags", [])) if isinstance(payload, dict) else "",
-            "status": record.get("status") or "PENDING",
-            "reviewer_notes": record.get("reviewer_notes") or "",
-            "approved_variant": record.get("approved_variant") or "",
-            "updated_at": str(record.get("updated_at") or ""),
-        }
+        raw_row = payload.get("raw_row") if isinstance(payload, dict) else None
+        row: dict[str, object] = dict(raw_row) if isinstance(raw_row, dict) else {}
+        for key in row.keys():
+            if key not in raw_columns:
+                raw_columns.append(key)
+
+        preferred_variant = str(payload.get("selected_variant") or payload.get("recommended_variant") or "A").strip().upper()
+        approved_variant = str(record.get("approved_variant") or "").strip().upper()
+
+        def _passes_copy_guard(item: dict[str, object]) -> bool:
+            flags = item.get("risk_flags") or []
+            return isinstance(flags, list) and "failed_copy_guard" not in flags
+
+        passing = [name for name in ["A", "B", "C"] if name in by_name and _passes_copy_guard(by_name[name])]
+        failed = [name for name in ["A", "B", "C"] if name in by_name and not _passes_copy_guard(by_name[name])]
+
+        selected_variant = approved_variant if approved_variant and approved_variant in by_name else preferred_variant
+        if selected_variant not in passing and passing:
+            selected_variant = passing[0]
+        if selected_variant not in by_name:
+            selected_variant = next(iter(by_name.keys()), "A")
+
+        selected_payload = by_name.get(selected_variant, {})
+        final_subject = str(selected_payload.get("subject") or "")
+        final_body = str(selected_payload.get("body") or "")
+
+        dossier_sources: list[object] = []
+        if isinstance(payload, dict):
+            dossier = payload.get("dossier") or {}
+            if isinstance(dossier, dict):
+                dossier_sources = dossier.get("sources") or []
+
+        generation_status = "OK" if passing else ("FAILED_COPY_GUARD" if by_name else str(payload.get("generation_status") or "OK"))
+        error_code = "" if passing else ("FAILED_COPY_GUARD" if by_name else str(payload.get("error_code") or ""))
+
+        warning_parts: list[str] = []
+        existing_warning = str(payload.get("generation_warning") or "") if isinstance(payload, dict) else ""
+        if existing_warning:
+            warning_parts.append(existing_warning)
+        if passing and failed:
+            warning_parts.append(f"Copy guard fallito per varianti: {', '.join(failed)}")
+        generation_warning = "; ".join(part for part in warning_parts if part)[:240]
+
+        risk_flags: set[str] = set()
+        selected_flags = selected_payload.get("risk_flags") or []
+        if isinstance(selected_flags, list):
+            risk_flags.update(str(item) for item in selected_flags if str(item))
+        if passing:
+            risk_flags.discard("failed_copy_guard")
+        if not dossier_sources:
+            risk_flags.add("limited_sources")
+
+        row.update(
+            {
+                "campaign_id": campaign_id,
+                "parent_slug": record.get("parent_slug") or "",
+                "company_name": record.get("company_name") or "",
+                "contact_name": record.get("contact_name") or "",
+                "contact_title": record.get("contact_title") or "",
+                "contact_email": record.get("contact_email") or "",
+                "variant_a_subject": by_name.get("A", {}).get("subject", ""),
+                "variant_a_body": by_name.get("A", {}).get("body", ""),
+                "variant_b_subject": by_name.get("B", {}).get("subject", ""),
+                "variant_b_body": by_name.get("B", {}).get("body", ""),
+                "variant_c_subject": by_name.get("C", {}).get("subject", ""),
+                "variant_c_body": by_name.get("C", {}).get("body", ""),
+                "recommended_variant": payload.get("recommended_variant", "") if isinstance(payload, dict) else "",
+                "final_subject": final_subject,
+                "final_body": final_body,
+                "selected_variant": selected_variant,
+                "generation_status": generation_status,
+                "generation_warning": generation_warning,
+                "error_code": error_code,
+                "evidence_summary": "; ".join((payload.get("dossier", {}) or {}).get("evidence", [])[:5])
+                if isinstance(payload, dict)
+                else "",
+                "risk_flags": "; ".join(sorted(risk_flags)),
+                "status": record.get("status") or "PENDING",
+                "reviewer_notes": record.get("reviewer_notes") or "",
+                "approved_variant": record.get("approved_variant") or "",
+                "updated_at": str(record.get("updated_at") or ""),
+            }
+        )
         rows.append(row)
 
+    columns = _merge_columns(raw_columns, approval_cols)
     target = Path(output_path)
     write_csv(target, rows, columns)
     return target
@@ -508,22 +563,48 @@ def _process_company_like_item(
                 error_message=message,
             )
 
-    all_flags = sorted(set(global_flags + [flag for v in variants for flag in v.risk_flags]))
-    warning = bool(all_flags) or not dossier.sources
+    # Row-level selection: it's acceptable if one variant fails the copy guard, as long as we can
+    # select at least one passing final variant.
+    all_variant_flags = sorted({flag for v in variants for flag in v.risk_flags})
     if not dossier.sources:
-        all_flags = sorted(set(all_flags + ["limited_sources"]))
+        all_variant_flags = sorted(set(all_variant_flags + ["limited_sources"]))
+
+    recommended_variant = (recommended_variant or "A").strip().upper()
+    by_name = {item.variant.upper(): item for item in variants}
+    failed_variants = sorted(
+        name for name, item in by_name.items() if "failed_copy_guard" in (item.risk_flags or [])
+    )
+    passing_variants = [item for item in variants if "failed_copy_guard" not in (item.risk_flags or [])]
 
     selected_variant = recommended_variant
-    by_name = _variants_by_name(variants)
-    final_subject = str(by_name.get(selected_variant, {}).get("subject") or "")
-    final_body = str(by_name.get(selected_variant, {}).get("body") or "")
-    generation_status = "OK"
-    error_code = ""
-    generation_warning = template_warning
-    if any("failed_copy_guard" in flag for flag in all_flags):
-        generation_status = "FAILED_COPY_GUARD"
-        error_code = "FAILED_COPY_GUARD"
-        generation_warning = "Copy guard non superato dopo repair"
+    if selected_variant not in {item.variant.upper() for item in passing_variants}:
+        selected_variant = passing_variants[0].variant.upper() if passing_variants else (selected_variant or "A")
+
+    selected_item = by_name.get(selected_variant)
+    final_subject = selected_item.subject if selected_item else ""
+    final_body = selected_item.body if selected_item else ""
+
+    generation_status = "OK" if passing_variants else "FAILED_COPY_GUARD"
+    error_code = "" if passing_variants else "FAILED_COPY_GUARD"
+
+    warning_parts: list[str] = []
+    if template_warning:
+        warning_parts.append(template_warning)
+    if not passing_variants:
+        warning_parts.append("Copy guard non superato dopo repair")
+    elif failed_variants:
+        warning_parts.append(f"Copy guard fallito per varianti: {', '.join(failed_variants)}")
+    generation_warning = "; ".join(part for part in warning_parts if part)[:240]
+
+    # Store only row-level risk flags (selected variant + global limited_sources), to avoid poisoning OK rows
+    # with a failed_copy_guard belonging to other variants.
+    row_flags = set(selected_item.risk_flags if selected_item else [])
+    if passing_variants:
+        row_flags.discard("failed_copy_guard")
+    if "limited_sources" in all_variant_flags:
+        row_flags.add("limited_sources")
+    row_risk_flags = sorted(row_flags)
+    warning = bool(row_risk_flags) or bool(failed_variants)
 
     result = CampaignCompanyResult(
         campaign_id=campaign_id,
@@ -534,7 +615,7 @@ def _process_company_like_item(
         variants=variants,
         recommended_variant=recommended_variant,
         approval=ApprovalRecord(status="PENDING", updated_at=utc_now_iso()),
-        risk_flags=all_flags,
+        risk_flags=row_risk_flags,
     )
 
     export_row = _company_result_to_row(

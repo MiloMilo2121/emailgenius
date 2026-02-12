@@ -255,6 +255,87 @@ class CampaignTests(unittest.TestCase):
             )
             self.assertGreater(summary.estimated_cost_eur, 0.01)
 
+    def test_selects_passing_variant_when_other_fails_copy_guard(self) -> None:
+        class _LLMOneFail(_FakeLLM):
+            def generate_campaign_variants(  # type: ignore[override]
+                self,
+                *,
+                parent,
+                company,
+                contact,
+                dossier,
+                marketing_snippets,
+                variant_mode: str = "ab",
+                llm_policy: str = "strict",
+                max_retries: int = 3,
+                backoff_base_seconds: float = 1.0,
+            ):
+                variants = [
+                    DraftEmailVariant(
+                        variant="A",
+                        subject=f"A-{company.company_name}",
+                        body="body-a",
+                        cta=parent.cta_policy,
+                        risk_flags=[],
+                    ),
+                    DraftEmailVariant(
+                        variant="B",
+                        subject=f"B-{company.company_name}",
+                        body="body-b",
+                        cta=parent.cta_policy,
+                        risk_flags=["failed_copy_guard"],
+                    ),
+                ]
+                return variants, "B", []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            leads_path = Path(tmpdir) / "leads.csv"
+            headers = ["Email", "First Name", "Last Name", "companyName", "website", "jobTitle"]
+            with leads_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=headers)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "Email": "anna@example.com",
+                        "First Name": "Anna",
+                        "Last Name": "Verdi",
+                        "companyName": "Beta SRL",
+                        "website": "https://beta.it",
+                        "jobTitle": "Founder",
+                    }
+                )
+
+            out_dir = Path(tmpdir) / "out"
+            store = _FakeStore(self._profile())
+            llm = _LLMOneFail()
+
+            summary, export_path, _ = run_campaign(
+                config=self._config(),
+                store=store,
+                llm=llm,
+                parent_slug="azienda-a",
+                leads_csv_path=str(leads_path),
+                out_dir=str(out_dir),
+                sheet_id=None,
+                recipient_mode="row",
+                variant_mode="ab",
+                output_schema="ab",
+                llm_policy="strict",
+                enrichment_mode="auto",
+                max_concurrency=1,
+                max_retries=1,
+                backoff_base_seconds=0.0,
+            )
+
+            self.assertEqual(summary.rows_failed, 0)
+            with export_path.open("r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                exported = list(reader)
+            self.assertEqual(len(exported), 1)
+            self.assertEqual(exported[0].get("generation_status"), "OK")
+            self.assertEqual(exported[0].get("selected_variant"), "A")
+            self.assertIn("Copy guard fallito", exported[0].get("generation_warning") or "")
+
     def test_export_auto_schema_uses_summary_metadata(self) -> None:
         class _ExportStore:
             def get_campaign_summary(self, campaign_id: str):
