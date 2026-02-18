@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .config import AppConfig
-from .enrichment import build_enrichment_dossier_sync
+from .enrichment import build_enrichment_dossier_sync, run_nebula_enrichment_machine
 from .guardrails import apply_claim_guard
 from .leads import (
     format_header_mapping,
@@ -501,11 +501,18 @@ def _process_company_like_item(
     snippets: list[str] = []
     global_flags: list[str] = []
     enrichment_flags: list[str] = []
+    nebula_payload: dict[str, object] = {}
 
     if not company.website:
         # If the lead has no website, do not waste tokens or attempt web enrichment: use the seed template as-is.
         template_only = True
         dossier = _minimal_dossier(company_name=company.company_name)
+        nebula = run_nebula_enrichment_machine(
+            company=company,
+            contact=primary_contact,
+            dossier=dossier,
+        )
+        nebula_payload = nebula.to_dict()
         rendered = format_email_body(render_seed_template(parent, company, primary_contact))
         subject = format_email_subject(_template_only_subject(company=company, contact=primary_contact))
         cleaned_text, claim_flags = apply_claim_guard(
@@ -560,6 +567,18 @@ def _process_company_like_item(
                     enrichment_flags.append("enrichment_site_low_content")
                     enrichment_warning = "Contenuti sito non estratti: personalizzazione web limitata."
 
+            nebula = run_nebula_enrichment_machine(
+                company=company,
+                contact=primary_contact,
+                dossier=dossier,
+            )
+            nebula_payload = nebula.to_dict()
+            snippets.extend(nebula.to_prompt_snippets(limit=10))
+            if nebula.depth == "low":
+                enrichment_flags.append("nebula_low_signal")
+                if not enrichment_warning:
+                    enrichment_warning = "Arricchimento limitato: pochi segnali aziendali affidabili."
+
             if rag_enabled:
                 retrieval_query = _build_retrieval_query(company=company, dossier=dossier)
                 retrieval_embeddings = llm.embed_texts([retrieval_query])
@@ -570,7 +589,10 @@ def _process_company_like_item(
                         query_embedding=retrieval_embeddings[0],
                         top_k=6,
                     )
-                    snippets = [str(item.get("content") or "") for item in search_results if item.get("content")]
+                    rag_snippets = [str(item.get("content") or "") for item in search_results if item.get("content")]
+                    snippets.extend(rag_snippets)
+
+            snippets = _dedupe_snippets(snippets, limit=14)
 
             variants, recommended_variant, global_flags = llm.generate_campaign_variants(
                 parent=parent,
@@ -594,7 +616,11 @@ def _process_company_like_item(
                     row_index=row_index,
                     export_row={},
                     result=None,
-                    extra_payload={"used_llm": used_llm, "template_only": template_only},
+                    extra_payload={
+                        "used_llm": used_llm,
+                        "template_only": template_only,
+                        "nebula": nebula_payload,
+                    },
                     warning=True,
                     failed=True,
                     fatal_error=True,
@@ -614,7 +640,11 @@ def _process_company_like_item(
                 row_index=row_index,
                 export_row=export_row,
                 result=None,
-                extra_payload={"used_llm": used_llm, "template_only": template_only},
+                extra_payload={
+                    "used_llm": used_llm,
+                    "template_only": template_only,
+                    "nebula": nebula_payload,
+                },
                 warning=True,
                 failed=True,
                 fatal_error=False,
@@ -699,6 +729,7 @@ def _process_company_like_item(
         "used_llm": used_llm,
         "template_only": template_only,
         "raw_row": raw_row,
+        "nebula": nebula_payload,
     }
     return _RowOutcome(
         row_index=row_index,
@@ -771,6 +802,20 @@ def _merge_columns(input_columns: list[str], generated_columns: list[str]) -> li
             continue
         seen.add(column)
         out.append(column)
+    return out
+
+
+def _dedupe_snippets(items: list[str], *, limit: int = 14) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        value = " ".join(str(item).split()).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+        if len(out) >= max(1, limit):
+            break
     return out
 
 

@@ -1,12 +1,48 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict, dataclass
 from urllib.parse import urlparse
 
 from .browser import fetch_website_snapshot
 from .search import discover_company_and_news, search_news_web
 from .types import EnrichmentDossier, LeadCompany, LeadContact, SearchHit
 from .utils import compact_lines
+
+
+@dataclass(slots=True)
+class NebulaEnrichmentMachine:
+    codename: str
+    score: float
+    depth: str
+    personalization_hooks: list[str]
+    value_angles: list[str]
+    evidence_highlights: list[str]
+    missing_data: list[str]
+
+    def to_prompt_snippets(self, *, limit: int = 12) -> list[str]:
+        snippets: list[str] = [
+            f"[{self.codename}] enrichment_depth={self.depth} score={self.score:.2f}",
+        ]
+        snippets.extend(f"[Hook] {item}" for item in self.personalization_hooks[:4])
+        snippets.extend(f"[Angle] {item}" for item in self.value_angles[:4])
+        snippets.extend(f"[Evidence] {item}" for item in self.evidence_highlights[:4])
+        snippets.extend(f"[Missing] {item}" for item in self.missing_data[:3])
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in snippets:
+            value = " ".join(item.split()).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            out.append(value[:220])
+            if len(out) >= max(1, limit):
+                break
+        return out
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
 
 
 async def build_enrichment_dossier(
@@ -86,6 +122,32 @@ async def build_enrichment_dossier(
         sources=compact_lines(sources, limit=15),
     )
     return dossier, website
+
+
+def run_nebula_enrichment_machine(
+    *,
+    company: LeadCompany,
+    contact: LeadContact | None,
+    dossier: EnrichmentDossier,
+) -> NebulaEnrichmentMachine:
+    codename = "NebulaForge"
+    score = _enrichment_score(company=company, contact=contact, dossier=dossier)
+    depth = "high" if score >= 0.70 else ("medium" if score >= 0.45 else "low")
+
+    hooks = _personalization_hooks(company=company, contact=contact, dossier=dossier)
+    angles = _value_angles(dossier=dossier)
+    evidence = _evidence_highlights(dossier=dossier)
+    missing = _missing_data_flags(company=company, contact=contact, dossier=dossier)
+
+    return NebulaEnrichmentMachine(
+        codename=codename,
+        score=score,
+        depth=depth,
+        personalization_hooks=hooks,
+        value_angles=angles,
+        evidence_highlights=evidence,
+        missing_data=missing,
+    )
 
 
 def build_enrichment_dossier_sync(
@@ -205,3 +267,115 @@ def _company_evidence(company: LeadCompany) -> list[str]:
         items.append(f"Founded year: {company.founded_year}")
     items.extend(company.evidence)
     return items
+
+
+def _enrichment_score(*, company: LeadCompany, contact: LeadContact | None, dossier: EnrichmentDossier) -> float:
+    score = 0.0
+    if company.industry:
+        score += 0.15
+    if company.location:
+        score += 0.10
+    if company.keywords:
+        score += 0.10
+    if contact and contact.title:
+        score += 0.10
+    if contact and contact.seniority:
+        score += 0.05
+
+    site_summary_len = len((dossier.site_summary or "").strip())
+    if site_summary_len >= 220:
+        score += 0.20
+    elif site_summary_len >= 80:
+        score += 0.12
+
+    score += min(0.12, len(dossier.news_items) * 0.04)
+    score += min(0.10, len(dossier.evidence) * 0.025)
+    score += min(0.12, len(dossier.sources) * 0.03)
+
+    if company.linkedin_company or (contact and contact.linkedin_person):
+        score += 0.06
+
+    return round(min(score, 1.0), 2)
+
+
+def _personalization_hooks(
+    *,
+    company: LeadCompany,
+    contact: LeadContact | None,
+    dossier: EnrichmentDossier,
+) -> list[str]:
+    hooks: list[str] = []
+    if contact and contact.full_name:
+        first_name = contact.full_name.split()[0].strip()
+        if first_name:
+            hooks.append(f"Referente: {first_name}")
+    if contact and contact.title:
+        hooks.append(f"Ruolo target: {contact.title}")
+    if company.industry:
+        hooks.append(f"Settore: {company.industry}")
+    if company.location:
+        hooks.append(f"Presidio geografico: {company.location}")
+    if company.keywords:
+        hooks.append(f"Keyword azienda: {company.keywords}")
+    if dossier.news_items:
+        hooks.append(f"News recente: {dossier.news_items[0].title}")
+    if company.linkedin_company:
+        hooks.append(f"LinkedIn aziendale: {company.linkedin_company}")
+
+    return _dedupe_keep_order(hooks, limit=8)
+
+
+def _value_angles(*, dossier: EnrichmentDossier) -> list[str]:
+    angles: list[str] = []
+    for pain in dossier.pain_hypotheses[:3]:
+        value = str(pain).strip()
+        if value:
+            angles.append(f"Pain: {value}")
+    for opportunity in dossier.opportunity_hypotheses[:3]:
+        value = str(opportunity).strip()
+        if value:
+            angles.append(f"Opportunity: {value}")
+    return _dedupe_keep_order(angles, limit=8)
+
+
+def _evidence_highlights(*, dossier: EnrichmentDossier) -> list[str]:
+    highlights: list[str] = []
+    highlights.extend(str(item).strip() for item in dossier.evidence[:6])
+    highlights.extend(f"Fonte: {item}" for item in dossier.sources[:4])
+    return _dedupe_keep_order(highlights, limit=10)
+
+
+def _missing_data_flags(
+    *,
+    company: LeadCompany,
+    contact: LeadContact | None,
+    dossier: EnrichmentDossier,
+) -> list[str]:
+    flags: list[str] = []
+    if not company.website:
+        flags.append("missing_company_website")
+    if not company.industry:
+        flags.append("missing_company_industry")
+    if not (contact and contact.title):
+        flags.append("missing_contact_title")
+    if len((dossier.site_summary or "").strip()) < 80:
+        flags.append("missing_site_summary_depth")
+    if not dossier.news_items:
+        flags.append("missing_news_context")
+    if not dossier.sources:
+        flags.append("missing_verified_sources")
+    return flags
+
+
+def _dedupe_keep_order(items: list[str], *, limit: int) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        value = " ".join(str(item).split()).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+        if len(out) >= max(1, limit):
+            break
+    return out

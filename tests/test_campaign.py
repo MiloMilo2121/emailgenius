@@ -37,6 +37,9 @@ class _FakeStore:
 
 
 class _FakeLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         return []
 
@@ -53,6 +56,12 @@ class _FakeLLM:
         max_retries: int = 3,
         backoff_base_seconds: float = 1.0,
     ):
+        self.calls.append(
+            {
+                "company": company.company_name,
+                "marketing_snippets": list(marketing_snippets),
+            }
+        )
         variants = [
             DraftEmailVariant(variant="A", subject=f"A-{company.company_name}", body="body-a", cta=parent.cta_policy),
             DraftEmailVariant(variant="B", subject=f"B-{company.company_name}", body="body-b", cta=parent.cta_policy),
@@ -172,6 +181,49 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(len(template_only_rows), 1)
             self.assertTrue(template_only_rows[0].get("final_subject"))
             self.assertTrue(template_only_rows[0].get("final_body"))
+
+    def test_nebula_machine_populates_llm_snippets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            leads_path = Path(tmpdir) / "leads.csv"
+            headers = ["Email", "First Name", "Last Name", "companyName", "website", "jobTitle"]
+            with leads_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=headers)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "Email": "anna@example.com",
+                        "First Name": "Anna",
+                        "Last Name": "Verdi",
+                        "companyName": "Beta SRL",
+                        "website": "https://beta.it",
+                        "jobTitle": "Founder",
+                    }
+                )
+            out_dir = Path(tmpdir) / "out"
+            store = _FakeStore(self._profile())
+            llm = _FakeLLM()
+
+            run_campaign(
+                config=self._config(),
+                store=store,
+                llm=llm,
+                parent_slug="azienda-a",
+                leads_csv_path=str(leads_path),
+                out_dir=str(out_dir),
+                sheet_id=None,
+                recipient_mode="row",
+                variant_mode="ab",
+                output_schema="ab",
+                llm_policy="strict",
+                enrichment_mode="auto",
+                max_concurrency=1,
+                max_retries=1,
+                backoff_base_seconds=0.0,
+            )
+
+            self.assertEqual(len(llm.calls), 1)
+            snippets = llm.calls[0].get("marketing_snippets") or []
+            self.assertTrue(any("NebulaForge" in str(item) for item in snippets))
 
     def test_output_schema_abc_contains_variant_c_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
