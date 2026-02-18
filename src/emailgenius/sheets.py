@@ -5,8 +5,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import parse_qs, urlparse
 
 import gspread
+from google.auth.transport.requests import AuthorizedSession
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -102,6 +104,7 @@ def publish_campaign_to_sheets(
     sheet_id: str | None,
     sheet_title: str | None,
     sheet_share_with: str | None,
+    drive_folder_id: str | None,
     rows: list[dict[str, object]],
     sendready_columns: list[str],
     service_account_json: str | None,
@@ -116,6 +119,8 @@ def publish_campaign_to_sheets(
         sheet_id=sheet_id,
         sheet_title=sheet_title,
     )
+    if drive_folder_id:
+        _move_sheet_to_drive_folder(gc=gc, sheet_id=resolved_id, folder_id_or_url=drive_folder_id)
     if sheet_share_with:
         spreadsheet.share(sheet_share_with, perm_type="user", role="writer", notify=False)
 
@@ -279,6 +284,76 @@ def _open_or_create_spreadsheet(
     title = (sheet_title or "EmailGenius Campaign").strip() or "EmailGenius Campaign"
     spreadsheet = gc.create(title)
     return spreadsheet, spreadsheet.id
+
+
+def _move_sheet_to_drive_folder(*, gc: gspread.Client, sheet_id: str, folder_id_or_url: str) -> None:
+    folder_id = _normalize_drive_folder_id(folder_id_or_url)
+    if not folder_id:
+        raise ValueError(f"Invalid Google Drive folder id/url: {folder_id_or_url}")
+
+    session = AuthorizedSession(gc.auth)
+    file_url = f"https://www.googleapis.com/drive/v3/files/{sheet_id}"
+
+    meta_resp = session.get(
+        file_url,
+        params={
+            "fields": "id,parents",
+            "supportsAllDrives": "true",
+        },
+        timeout=30,
+    )
+    if meta_resp.status_code >= 400:
+        raise RuntimeError(f"Unable to read Google Drive file metadata (status={meta_resp.status_code})")
+
+    payload = meta_resp.json() if meta_resp.content else {}
+    parents = payload.get("parents") if isinstance(payload, dict) else []
+    if not isinstance(parents, list):
+        parents = []
+
+    if folder_id in parents and len(parents) == 1:
+        return
+
+    patch_params: dict[str, str] = {
+        "addParents": folder_id,
+        "supportsAllDrives": "true",
+        "fields": "id,parents",
+    }
+    to_remove = ",".join(parent for parent in parents if isinstance(parent, str) and parent and parent != folder_id)
+    if to_remove:
+        patch_params["removeParents"] = to_remove
+
+    move_resp = session.patch(
+        file_url,
+        params=patch_params,
+        timeout=30,
+    )
+    if move_resp.status_code >= 400:
+        raise RuntimeError(f"Unable to move Google Sheet into Drive folder (status={move_resp.status_code})")
+
+
+def _normalize_drive_folder_id(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if "/" not in raw:
+        return raw
+
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+
+    # Expected formats:
+    # - https://drive.google.com/drive/folders/<id>
+    # - https://drive.google.com/open?id=<id>
+    parts = [item for item in parsed.path.split("/") if item]
+    if "folders" in parts:
+        idx = parts.index("folders")
+        if idx + 1 < len(parts):
+            return parts[idx + 1].strip()
+
+    query = parse_qs(parsed.query)
+    candidate = (query.get("id") or [""])[0].strip()
+    return candidate
 
 
 def _chunk(values: list[list[str]], size: int) -> Iterable[list[list[str]]]:

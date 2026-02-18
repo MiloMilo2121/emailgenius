@@ -79,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Share the Google Sheet with this email as writer (service-account runs typically need this)",
     )
     campaign_run.add_argument(
+        "--drive-folder-id",
+        help="Google Drive folder id (or folder URL) where the sheet should be moved",
+    )
+    campaign_run.add_argument(
         "--gsheets-auth",
         default="auto",
         choices=["auto", "service_account", "oauth"],
@@ -315,6 +319,7 @@ def main() -> int:
                 sheet_id=args.sheet_id,
                 sheet_title=args.sheet_title,
                 sheet_share_with=args.sheet_share_with,
+                drive_folder_id=args.drive_folder_id,
                 gsheets_auth=args.gsheets_auth,
                 stages=args.stages,
                 headless=not args.headful,
