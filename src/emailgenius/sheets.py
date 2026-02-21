@@ -304,7 +304,10 @@ def _move_sheet_to_drive_folder(*, gc: gspread.Client, sheet_id: str, folder_id_
     if not folder_id:
         raise ValueError(f"Invalid Google Drive folder id/url: {folder_id_or_url}")
 
-    session = AuthorizedSession(gc.auth)
+    auth = getattr(getattr(gc, "http_client", None), "auth", None)
+    if auth is None:
+        raise RuntimeError("Unable to resolve Google auth credentials from gspread client")
+    session = AuthorizedSession(auth)
     file_url = f"https://www.googleapis.com/drive/v3/files/{sheet_id}"
 
     meta_resp = session.get(
