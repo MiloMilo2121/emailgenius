@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -101,6 +102,7 @@ def run_campaign(
         enrichment_mode=enrichment_mode,
     )
     rag_enabled = bool(config.openai_api_key)
+    memory_snippets = _load_email_memory_snippets(store=store, parent_slug=parent_slug, limit=12)
 
     campaign_id = store.create_campaign(parent_slug=parent_slug, leads_file=leads_csv_path, sheet_id=sheet_id)
     all_columns = _merge_columns(preflight.input_columns, approval_columns(output_schema))
@@ -129,6 +131,7 @@ def run_campaign(
             max_retries=max_retries,
             backoff_base_seconds=backoff_base_seconds,
             output_schema=output_schema,
+            memory_snippets=memory_snippets,
         )
         by_row_index = {item.row_index: item for item in outcomes}
         for row in preflight.rows:
@@ -181,6 +184,7 @@ def run_campaign(
                 max_retries=max_retries,
                 backoff_base_seconds=backoff_base_seconds,
                 output_schema=output_schema,
+                memory_snippets=memory_snippets,
             )
             if outcome.fatal_error:
                 raise RuntimeError(outcome.error_message or "Fatal campaign error")
@@ -262,6 +266,15 @@ def run_campaign(
 
     per_item_estimated_cost = estimated_cost_eur / max(llm_items_planned, 1)
     actual_cost_eur = round(per_item_estimated_cost * llm_items_attempted, 2) if llm_items_planned else 0.0
+
+    _persist_email_memory_snapshot(
+        store=store,
+        parent_slug=parent_slug,
+        summary_rows=export_rows,
+        rows_total=preflight.rows_total,
+        rows_generated_ok=rows_generated_ok,
+        rows_failed=rows_failed,
+    )
 
     summary = CampaignSummary(
         campaign_id=campaign_id,
@@ -427,6 +440,7 @@ def _run_row_mode(
     max_retries: int,
     backoff_base_seconds: float,
     output_schema: str,
+    memory_snippets: list[str],
 ) -> list[_RowOutcome]:
     valid_rows = [item for item in preflight.rows if item.is_valid]
     if not valid_rows:
@@ -456,6 +470,7 @@ def _run_row_mode(
                 max_retries=max_retries,
                 backoff_base_seconds=backoff_base_seconds,
                 output_schema=output_schema,
+                memory_snippets=memory_snippets,
                 row_index=item.row_index,
             )
             for item in valid_rows
@@ -491,6 +506,7 @@ def _process_company_like_item(
     max_retries: int,
     backoff_base_seconds: float,
     output_schema: str,
+    memory_snippets: list[str],
     row_index: int = 0,
 ) -> _RowOutcome:
     company, contacts = build_company_and_contacts(canonical_rows)
@@ -576,6 +592,7 @@ def _process_company_like_item(
             )
             nebula_payload = nebula.to_dict()
             snippets.extend(nebula.to_prompt_snippets(limit=10))
+            snippets.extend(memory_snippets)
             if nebula.depth == "low":
                 enrichment_flags.append("nebula_low_signal")
                 if not enrichment_warning:
@@ -805,6 +822,95 @@ def _merge_columns(input_columns: list[str], generated_columns: list[str]) -> li
         seen.add(column)
         out.append(column)
     return out
+
+
+def _load_email_memory_snippets(*, store: PostgresStore, parent_slug: str, limit: int = 12) -> list[str]:
+    list_memories = getattr(store, "list_agent_memories", None)
+    if not callable(list_memories):
+        return []
+
+    try:
+        memories = list_memories(parent_slug=parent_slug, kind="email_playbook", limit=3)
+    except Exception:
+        return []
+
+    snippets: list[str] = []
+    for memory in memories:
+        payload = memory.get("memory_json")
+        if not isinstance(payload, dict):
+            continue
+        top_subjects = payload.get("top_subjects") or []
+        for item in top_subjects[:3]:
+            text = str(item).strip()
+            if text:
+                snippets.append(f"[MemorySubject] {text}")
+        avoid_flags = payload.get("avoid_flags") or []
+        for item in avoid_flags[:5]:
+            text = str(item).strip()
+            if text:
+                snippets.append(f"[MemoryAvoidFlag] {text}")
+        preferred_signals = payload.get("preferred_signal_terms") or []
+        for item in preferred_signals[:4]:
+            text = str(item).strip()
+            if text:
+                snippets.append(f"[MemorySignal] {text}")
+
+    return _dedupe_snippets(snippets, limit=limit)
+
+
+def _persist_email_memory_snapshot(
+    *,
+    store: PostgresStore,
+    parent_slug: str,
+    summary_rows: list[dict[str, object]],
+    rows_total: int,
+    rows_generated_ok: int,
+    rows_failed: int,
+) -> None:
+    insert_memory = getattr(store, "insert_agent_memory", None)
+    if not callable(insert_memory):
+        return
+
+    rows_ok = [row for row in summary_rows if str(row.get("generation_status") or "") == "OK"]
+    top_subjects: list[str] = []
+    for row in rows_ok:
+        subject = str(row.get("final_subject") or row.get("variant_a_subject") or "").strip()
+        if subject and subject not in top_subjects:
+            top_subjects.append(subject)
+        if len(top_subjects) >= 8:
+            break
+
+    flag_counter: Counter[str] = Counter()
+    signal_counter: Counter[str] = Counter()
+    for row in summary_rows:
+        raw_flags = str(row.get("risk_flags") or "")
+        for flag in [item.strip() for item in raw_flags.split(";") if item.strip()]:
+            flag_counter[flag] += 1
+
+        evidence = str(row.get("evidence_summary") or "").lower()
+        for token in ("industry", "homepage title", "location", "linkedin", "news", "employee count"):
+            if token in evidence:
+                signal_counter[token] += 1
+
+    avoid_flags = [flag for flag, _ in flag_counter.most_common(8) if flag not in {"limited_sources"}]
+    preferred_signals = [token for token, _ in signal_counter.most_common(6)]
+
+    quality_score = round(rows_generated_ok / max(rows_total, 1), 4)
+    snapshot = {
+        "rows_total": rows_total,
+        "rows_generated_ok": rows_generated_ok,
+        "rows_failed": rows_failed,
+        "top_subjects": top_subjects,
+        "avoid_flags": avoid_flags,
+        "preferred_signal_terms": preferred_signals,
+        "note": "Memoria auto-generata da run campagna per migliorare prompt successivi.",
+        "created_at": utc_now_iso(),
+    }
+    try:
+        insert_memory(parent_slug=parent_slug, kind="email_playbook", memory=snapshot, score=quality_score)
+    except Exception:
+        # Memory write must never block campaign completion.
+        return
 
 
 def _dedupe_snippets(items: list[str], *, limit: int = 14) -> list[str]:

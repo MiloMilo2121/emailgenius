@@ -106,6 +106,20 @@ class PostgresStore:
             CREATE INDEX IF NOT EXISTS idx_campaign_records_campaign_status
             ON campaign_company_records(campaign_id, status)
             """,
+            """
+            CREATE TABLE IF NOT EXISTS agent_memories (
+                id UUID PRIMARY KEY,
+                parent_slug TEXT NOT NULL REFERENCES parent_profiles(slug) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                memory_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                score DOUBLE PRECISION NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_memories_parent_kind_created
+            ON agent_memories(parent_slug, kind, created_at DESC)
+            """,
         ]
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -442,6 +456,57 @@ class PostgresStore:
                         payload = json.loads(payload)
                     item = dict(row)
                     item["payload_json"] = payload
+                    rows.append(item)
+                return rows
+
+    def insert_agent_memory(
+        self,
+        *,
+        parent_slug: str,
+        kind: str,
+        memory: dict[str, object],
+        score: float = 0.0,
+    ) -> str:
+        memory_id = str(uuid.uuid4())
+        payload = json.dumps(memory, ensure_ascii=False)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO agent_memories(id, parent_slug, kind, memory_json, score)
+                    VALUES (%s, %s, %s, %s::jsonb, %s)
+                    """,
+                    (memory_id, parent_slug, kind, payload, float(score)),
+                )
+        return memory_id
+
+    def list_agent_memories(
+        self,
+        *,
+        parent_slug: str,
+        kind: str,
+        limit: int = 5,
+    ) -> list[dict[str, object]]:
+        lim = max(1, int(limit))
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, parent_slug, kind, memory_json, score, created_at
+                    FROM agent_memories
+                    WHERE parent_slug=%s AND kind=%s
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (parent_slug, kind, lim),
+                )
+                rows: list[dict[str, object]] = []
+                for row in cur.fetchall():
+                    payload = row.get("memory_json")
+                    if isinstance(payload, str):
+                        payload = json.loads(payload)
+                    item = dict(row)
+                    item["memory_json"] = payload if isinstance(payload, dict) else {}
                     rows.append(item)
                 return rows
 
