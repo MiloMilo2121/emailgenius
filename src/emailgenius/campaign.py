@@ -248,6 +248,8 @@ def run_campaign(
         publish_result = publish_campaign_to_sheets(
             sheet_id=sheet_id,
             sheet_title=sheet_title,
+            parent_slug=parent_slug,
+            campaign_id=campaign_id,
             sheet_share_with=sheet_share_with,
             drive_folder_id=drive_folder_id,
             rows=export_rows,

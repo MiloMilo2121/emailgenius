@@ -3,7 +3,9 @@ from __future__ import annotations
 import getpass
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Iterable
 from urllib.parse import parse_qs, urlparse
 
@@ -103,6 +105,8 @@ def publish_campaign_to_sheets(
     *,
     sheet_id: str | None,
     sheet_title: str | None,
+    parent_slug: str | None,
+    campaign_id: str | None,
     sheet_share_with: str | None,
     drive_folder_id: str | None,
     rows: list[dict[str, object]],
@@ -118,6 +122,8 @@ def publish_campaign_to_sheets(
         gc=gc,
         sheet_id=sheet_id,
         sheet_title=sheet_title,
+        parent_slug=parent_slug,
+        campaign_id=campaign_id,
     )
     if drive_folder_id:
         _move_sheet_to_drive_folder(gc=gc, sheet_id=resolved_id, folder_id_or_url=drive_folder_id)
@@ -290,13 +296,38 @@ def _open_or_create_spreadsheet(
     gc: gspread.Client,
     sheet_id: str | None,
     sheet_title: str | None,
+    parent_slug: str | None,
+    campaign_id: str | None,
 ) -> tuple[gspread.Spreadsheet, str]:
     if sheet_id:
         spreadsheet = gc.open_by_key(sheet_id)
         return spreadsheet, sheet_id
-    title = (sheet_title or "EmailGenius Campaign").strip() or "EmailGenius Campaign"
+    title = _build_sheet_title(sheet_title=sheet_title, parent_slug=parent_slug, campaign_id=campaign_id)
     spreadsheet = gc.create(title)
     return spreadsheet, spreadsheet.id
+
+
+def _build_sheet_title(*, sheet_title: str | None, parent_slug: str | None, campaign_id: str | None) -> str:
+    base = (sheet_title or "EmailGenius Campaign").strip() or "EmailGenius Campaign"
+    lowered = base.lower()
+    date_tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    parent_tag = " ".join((parent_slug or "").split()).strip()
+    campaign_tag = ""
+    compact_campaign_id = " ".join((campaign_id or "").split()).strip()
+    if compact_campaign_id:
+        campaign_tag = f"campaign-{compact_campaign_id[:8]}"
+
+    parts = [base]
+    if parent_tag and parent_tag.lower() not in lowered:
+        parts.append(parent_tag)
+    elif campaign_tag and campaign_tag.lower() not in lowered:
+        parts.append(campaign_tag)
+
+    if not re.search(r"\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b", base):
+        parts.append(date_tag)
+
+    title = " | ".join(part for part in parts if part)
+    return title[:100]
 
 
 def _move_sheet_to_drive_folder(*, gc: gspread.Client, sheet_id: str, folder_id_or_url: str) -> None:

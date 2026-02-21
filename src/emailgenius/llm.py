@@ -200,6 +200,7 @@ class LLMGateway:
     ) -> tuple[list[DraftEmailVariant], str, list[str]]:
         requested_variants = _variant_names_for_mode(variant_mode)
         rewrite_targets = _rewrite_targets_for_variants(requested_variants)
+        real_insights = _extract_real_insights(company, dossier)
         if self._client is None:
             if llm_policy == "strict":
                 raise RuntimeError("LLM unavailable: configure OPENAI_API_KEY or set --llm-policy fallback")
@@ -220,6 +221,10 @@ class LLMGateway:
                 **asdict(dossier),
                 "news_items": [asdict(item) for item in dossier.news_items],
             },
+            "real_personalization_insights": [
+                {"fact": fact, "meaning": meaning}
+                for fact, meaning in real_insights
+            ],
             "retrieved_marketing_knowledge": marketing_snippets,
             "seed_template": parent.outreach_seed_template,
             "constraints": {
@@ -241,6 +246,12 @@ class LLMGateway:
                     "micro-angolo valore",
                     "subject",
                 ],
+                "personalization_rules": {
+                    "use_real_insights_if_available": bool(real_insights),
+                    "real_insights_min": 1 if real_insights else 0,
+                    "real_insights_max": 2,
+                    "connect_fact_to_meaning": True,
+                },
                 "anti_spam": {
                     "no_all_caps_aggressive": True,
                     "max_exclamation_marks": 1,
@@ -270,6 +281,8 @@ class LLMGateway:
             "Applica budget diversi per variante: A con riscrittura contenuta (25-30%), "
             "B con riscrittura ampia ma controllata (50-60%), C intermedia quando richiesta. "
             "Personalizza solo incipit, riferimento ruolo/azienda, micro-angolo valore e subject. "
+            "Se nel JSON trovi real_personalization_insights, usa 1-2 fatti reali massimo e collega ogni fatto "
+            "a un significato operativo concreto per il prospect. "
             "Evita toni spam, clickbait, urgenza artificiale, MAIUSCOLO aggressivo, claim assoluti/non verificabili. "
             "Oggetto: specifico e corto (idealmente <= 70 caratteri, <= 9 parole). "
             "Formato: paragrafi brevi (1-2 frasi), una riga vuota tra paragrafi e tra blocchi tematici; "
@@ -555,6 +568,70 @@ def _ensure_variants(
     return variants[: len(requested_variants)]
 
 
+def _extract_real_insights(company: LeadCompany, dossier: EnrichmentDossier) -> list[tuple[str, str]]:
+    insights: list[tuple[str, str]] = []
+    seen_facts: set[str] = set()
+
+    def _push(fact: str, meaning: str) -> None:
+        fact_clean = " ".join((fact or "").split()).strip()
+        meaning_clean = " ".join((meaning or "").split()).strip()
+        if not fact_clean or not meaning_clean:
+            return
+        key = fact_clean.lower()
+        if key in seen_facts:
+            return
+        seen_facts.add(key)
+        insights.append((fact_clean, meaning_clean))
+
+    if dossier.news_items:
+        title = str(dossier.news_items[0].title or "").strip()
+        if title:
+            _push(
+                f"Notizia recente: {title}",
+                "significa che c'e' movimento strategico in corso e conviene proporre un confronto operativo ora.",
+            )
+
+    industry = (company.industry or "").strip()
+    if industry:
+        _push(
+            f"Settore rilevato: {industry}",
+            "per personalizzare l'email su casi, linguaggio e priorita' specifiche del settore.",
+        )
+
+    homepage_evidence = ""
+    for item in dossier.evidence:
+        text = str(item).strip()
+        if text.lower().startswith("homepage title:"):
+            homepage_evidence = text
+            break
+    if homepage_evidence:
+        _push(
+            homepage_evidence,
+            "indica il posizionamento pubblico attuale dell'azienda e aiuta a rendere l'incipit credibile.",
+        )
+
+    if dossier.pain_hypotheses:
+        pain = str(dossier.pain_hypotheses[0] or "").strip()
+        if pain:
+            _push(
+                f"Pain operativo ipotizzato: {pain}",
+                "consente di proporre una micro-soluzione concreta invece di un messaggio generico.",
+            )
+
+    return insights[:2]
+
+
+def _render_insight_block(company: LeadCompany, dossier: EnrichmentDossier) -> str:
+    insights = _extract_real_insights(company, dossier)
+    if not insights:
+        return ""
+
+    lines = ["Dai dati pubblici emergono due punti utili:"]
+    for fact, meaning in insights:
+        lines.append(f"- {fact}. Significato: {meaning}")
+    return "\n".join(lines).strip()
+
+
 def _fallback_variants(
     *,
     parent: ParentProfile,
@@ -565,18 +642,24 @@ def _fallback_variants(
     rewrite_targets: dict[str, tuple[float, float]],
 ) -> tuple[list[DraftEmailVariant], str, list[str]]:
     rendered = _render_seed_template(parent, company, contact)
+    insight_block = _render_insight_block(company, dossier)
+    rendered_with_insights = (
+        f"{rendered}\n\n{insight_block}".strip() if insight_block else rendered
+    )
+    insight_section = f"{insight_block}\n\n" if insight_block else ""
     contact_name = contact.full_name if contact and contact.full_name else "Team"
     subject_a = _fallback_subject(company=company, contact=contact)
     subject_b = f"{company.company_name}: confronto operativo su opportunita concrete"
     subject_c = f"{company.company_name}: proposta di analisi preliminare"
 
     templates = {
-        "A": rendered,
+        "A": rendered_with_insights,
         "B": (
             f"Ciao {contact_name},\n\n"
             f"ti propongo un confronto rapido su {company.company_name}. "
             "Molte aziende simili stanno finanziando investimenti con contributi che riducono "
             "l'esborso iniziale e liberano cassa operativa.\n\n"
+            f"{insight_section}"
             "Possiamo verificare insieme se nel tuo caso ci sono opportunita concrete, "
             "con un'analisi mirata ai prossimi investimenti e alle priorita reali del business.\n\n"
             f"{parent.sender_name or parent.company_name}\n"
@@ -586,7 +669,7 @@ def _fallback_variants(
             f"Ciao {contact_name},\n\n"
             f"partendo da informazioni pubbliche su {company.company_name}, "
             "abbiamo identificato alcune opportunita da verificare in modo operativo.\n\n"
-            f"{rendered}"
+            f"{rendered_with_insights}"
         ),
     }
     subjects = {"A": subject_a, "B": subject_b, "C": subject_c}

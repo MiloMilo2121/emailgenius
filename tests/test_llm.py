@@ -5,7 +5,7 @@ import unittest
 from emailgenius.llm import apply_template_replacements
 from emailgenius.llm import LLMGateway
 from emailgenius.llm import _coerce_variants_raw
-from emailgenius.types import EnrichmentDossier, LeadCompany, LeadContact, ParentProfile
+from emailgenius.types import EnrichmentDossier, LeadCompany, LeadContact, ParentProfile, SearchHit
 
 
 class LLMFallbackTests(unittest.TestCase):
@@ -117,6 +117,58 @@ class LLMFallbackTests(unittest.TestCase):
         self.assertEqual(len(variants), 2)
         self.assertIn(recommended, {"A", "B"})
         self.assertIsInstance(flags, list)
+
+    def test_fallback_mode_uses_real_insights_when_available(self) -> None:
+        llm = LLMGateway(api_key=None, chat_model="gpt-5", embedding_model="text-embedding-3-small")
+        parent = ParentProfile(
+            slug="azienda-a",
+            company_name="Azienda A",
+            tone="formale-consulenziale",
+            cta_policy="call conoscitiva 20-30 min",
+            sender_name="Ivan Lorenzoni",
+            sender_company="Contributo Facile",
+            outreach_seed_template="Ciao {{first_name}}, opportunita per {{company_name}}.",
+        )
+        company = LeadCompany(
+            company_key="acme",
+            company_name="Acme",
+            website="https://acme.it",
+            linkedin_company=None,
+            industry="machinery",
+            employee_count=50,
+            location="Bergamo, Lombardy, Italy",
+            keywords="automation, b2b",
+            tech="WordPress",
+            founded_year=1999,
+        )
+        contact = LeadContact(
+            full_name="Mario Rossi",
+            title="CEO",
+            seniority="c_suite",
+            email="mario@example.com",
+            linkedin_person=None,
+            quality_flag="good",
+            score=80,
+        )
+        dossier = EnrichmentDossier(
+            site_summary="azienda manifatturiera",
+            news_items=[SearchHit(title="Acme avvia nuovo polo produttivo", url="https://news.example/acme")],
+            pain_hypotheses=["pressione su efficienza energetica"],
+            evidence=["Homepage title: soluzioni industriali per efficienza"],
+        )
+
+        variants, _, _ = llm.generate_campaign_variants(
+            parent=parent,
+            company=company,
+            contact=contact,
+            dossier=dossier,
+            marketing_snippets=[],
+            llm_policy="fallback",
+            variant_mode="ab",
+        )
+        body_a = next(item.body for item in variants if item.variant == "A")
+        self.assertIn("Significato:", body_a)
+        self.assertIn("Notizia recente:", body_a)
 
     def test_coerce_variants_raw_accepts_dict_mapping(self) -> None:
         raw = {

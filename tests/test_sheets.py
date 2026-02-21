@@ -4,6 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
+from emailgenius.sheets import _build_sheet_title
 from emailgenius.sheets import _normalize_drive_folder_id
 from emailgenius.sheets import _oauth_local_port
 
@@ -32,6 +33,23 @@ class SheetsTests(unittest.TestCase):
             self.assertEqual(_oauth_local_port(), 56000)
         with patch.dict(os.environ, {"EMAILGENIUS_GOOGLE_OAUTH_LOCAL_PORT": "bad"}, clear=False):
             self.assertEqual(_oauth_local_port(), 53877)
+
+    def test_build_sheet_title_includes_campaign_or_parent_and_date(self) -> None:
+        title = _build_sheet_title(
+            sheet_title="EmailGenius AB Enriched",
+            parent_slug="contributo-facile",
+            campaign_id="f1930196-79b3-4eb1-91b5-332ef5c5a845",
+        )
+        self.assertIn("contributo-facile", title)
+        self.assertRegex(title, r"20[0-9]{2}-[0-9]{2}-[0-9]{2}")
+
+    def test_build_sheet_title_uses_campaign_when_parent_missing(self) -> None:
+        title = _build_sheet_title(
+            sheet_title="EmailGenius",
+            parent_slug=None,
+            campaign_id="f1930196-79b3-4eb1-91b5-332ef5c5a845",
+        )
+        self.assertIn("campaign-f1930196", title)
 
 
 if __name__ == "__main__":

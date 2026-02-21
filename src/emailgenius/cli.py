@@ -412,6 +412,12 @@ def main() -> int:
                 sendready_columns = [column for column in (reader.fieldnames or []) if column]
                 for row in reader:
                     rows.append(dict(row))
+            parent_slug_hint = ""
+            campaign_id_hint = ""
+            if rows:
+                first = rows[0]
+                parent_slug_hint = str(first.get("parent_slug") or "").strip()
+                campaign_id_hint = str(first.get("campaign_id") or "").strip()
 
             auth_mode = (args.gsheets_auth or "auto").lower()
             if auth_mode not in {"auto", "service_account", "oauth"}:
@@ -438,6 +444,8 @@ def main() -> int:
             result = publish_campaign_to_sheets(
                 sheet_id=args.sheet_id,
                 sheet_title=args.sheet_title,
+                parent_slug=parent_slug_hint or None,
+                campaign_id=campaign_id_hint or None,
                 sheet_share_with=args.sheet_share_with,
                 drive_folder_id=args.drive_folder_id,
                 rows=rows,
