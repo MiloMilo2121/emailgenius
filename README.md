@@ -118,6 +118,13 @@ emailgenius campaign export \
   --format csv \
   --output-schema auto \
   --out reports/campaigns/export.csv
+
+# Fast path: publish an existing CSV to Google Sheets (no re-run)
+emailgenius campaign publish-sheet \
+  --csv reports/campaigns/campaign-<campaign_id>.csv \
+  --sheet-title "EmailGenius Drafts" \
+  --drive-folder-id "<DRIVE_FOLDER_ID_OR_URL>" \
+  --gsheets-auth oauth
 ```
 
 ## Colonne output approvazione

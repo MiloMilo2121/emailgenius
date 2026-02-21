@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -11,6 +12,7 @@ from .knowledge import ingest_knowledge_file
 from .llm import LLMGateway
 from .pipeline import analyze_company_sync, discover_and_analyze_company_sync, result_to_dict
 from .profiles import load_parent_profile
+from .sheets import publish_campaign_to_sheets
 from .storage import PostgresStore
 from .utils import slugify
 
@@ -143,6 +145,34 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         choices=["auto", "ab", "abc"],
         help="Export schema",
+    )
+
+    campaign_publish_sheet = campaign_sub.add_parser(
+        "publish-sheet",
+        help="Publish an existing campaign CSV to Google Sheets without re-running enrichment/generation",
+    )
+    campaign_publish_sheet.add_argument("--csv", required=True, help="Path to an existing campaign CSV")
+    campaign_publish_sheet.add_argument("--sheet-id", help="Target Google Sheet id (optional)")
+    campaign_publish_sheet.add_argument("--sheet-title", help="Create a new Google Sheet with this title")
+    campaign_publish_sheet.add_argument(
+        "--sheet-share-with",
+        help="Share the Google Sheet with this email as writer",
+    )
+    campaign_publish_sheet.add_argument(
+        "--drive-folder-id",
+        help="Google Drive folder id (or folder URL) where the sheet should be moved",
+    )
+    campaign_publish_sheet.add_argument(
+        "--gsheets-auth",
+        default="auto",
+        choices=["auto", "service_account", "oauth"],
+        help="Google Sheets auth mode",
+    )
+    campaign_publish_sheet.add_argument(
+        "--output-schema",
+        default="ab",
+        choices=["ab", "abc"],
+        help="Approval schema (Drafts tab columns)",
     )
 
     return parser
@@ -301,14 +331,13 @@ def main() -> int:
             return 0
 
     if args.command == "campaign":
-        try:
-            store = _store(config)
-        except RuntimeError as exc:
-            print(str(exc))
-            return 1
-        llm = _llm(config)
-
         if args.campaign_command == "run":
+            try:
+                store = _store(config)
+            except RuntimeError as exc:
+                print(str(exc))
+                return 1
+            llm = _llm(config)
             summary, export_path, _ = run_campaign(
                 config=config,
                 store=store,
@@ -349,6 +378,11 @@ def main() -> int:
             return 0
 
         if args.campaign_command == "status":
+            try:
+                store = _store(config)
+            except RuntimeError as exc:
+                print(str(exc))
+                return 1
             status = campaign_status(store, args.campaign_id)
             if status is None:
                 print("Campaign not found")
@@ -357,8 +391,65 @@ def main() -> int:
             return 0
 
         if args.campaign_command == "export":
+            try:
+                store = _store(config)
+            except RuntimeError as exc:
+                print(str(exc))
+                return 1
             output_path = export_campaign(store, args.campaign_id, args.out, output_schema=args.output_schema)
             print(f"Campaign exported: {output_path}")
+            return 0
+
+        if args.campaign_command == "publish-sheet":
+            csv_path = Path(args.csv)
+            if not csv_path.exists():
+                print(f"CSV not found: {csv_path}")
+                return 1
+
+            rows: list[dict[str, object]] = []
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                sendready_columns = [column for column in (reader.fieldnames or []) if column]
+                for row in reader:
+                    rows.append(dict(row))
+
+            auth_mode = (args.gsheets_auth or "auto").lower()
+            if auth_mode not in {"auto", "service_account", "oauth"}:
+                print("gsheets_auth must be one of: auto, service_account, oauth")
+                return 1
+
+            service_account_json = config.google_service_account_json
+            auth_interactive = False
+            if auth_mode == "oauth":
+                service_account_json = None
+                auth_interactive = True
+            elif auth_mode == "service_account":
+                if not service_account_json:
+                    print("GOOGLE_SERVICE_ACCOUNT_JSON is required for gsheets_auth=service_account")
+                    return 1
+            else:
+                if not service_account_json:
+                    print(
+                        "Google Sheets auth not configured. "
+                        "Set GOOGLE_SERVICE_ACCOUNT_JSON or re-run with --gsheets-auth oauth."
+                    )
+                    return 1
+
+            result = publish_campaign_to_sheets(
+                sheet_id=args.sheet_id,
+                sheet_title=args.sheet_title,
+                sheet_share_with=args.sheet_share_with,
+                drive_folder_id=args.drive_folder_id,
+                rows=rows,
+                sendready_columns=sendready_columns,
+                service_account_json=service_account_json,
+                output_schema=args.output_schema,
+                auth_interactive=auth_interactive,
+            )
+            print(f"[gsheets] published: {result.spreadsheet_url}")
+            print(
+                f"[gsheets] rows drafts={result.drafts_rows_written} sendready={result.sendready_rows_written}"
+            )
             return 0
 
     parser.error("Unknown command")
