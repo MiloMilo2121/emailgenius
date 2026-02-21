@@ -227,7 +227,7 @@ def _resolve_gspread_client(*, service_account_json: str | None, interactive: bo
             }
         }
         flow = InstalledAppFlow.from_client_config(client_config, scopes=SHEETS_SCOPES)
-        creds = flow.run_local_server(port=0, open_browser=True)
+        creds = flow.run_local_server(port=_oauth_local_port(), open_browser=True)
         _save_oauth_credentials(creds, token_path)
 
     if creds.expired and creds.refresh_token:
@@ -256,6 +256,19 @@ def _oauth_client_secret() -> str | None:
         or ""
     ).strip()
     return value or None
+
+
+def _oauth_local_port() -> int:
+    raw = (os.getenv("EMAILGENIUS_GOOGLE_OAUTH_LOCAL_PORT") or "").strip()
+    if not raw:
+        return 53877
+    try:
+        port = int(raw)
+    except ValueError:
+        return 53877
+    if port <= 0 or port > 65535:
+        return 53877
+    return port
 
 
 def _load_oauth_credentials(path: Path) -> Credentials | None:
