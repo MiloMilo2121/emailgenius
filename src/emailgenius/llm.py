@@ -152,32 +152,63 @@ def _coerce_variants_raw(value: object, *, preferred_order: list[str]) -> list[d
 
 
 class LLMGateway:
-    def __init__(self, *, api_key: str | None, chat_model: str, embedding_model: str) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str | None,
+        chat_model: str,
+        embedding_model: str,
+        api_base_url: str | None = None,
+        fallback_api_key: str | None = None,
+        fallback_chat_model: str | None = None,
+        fallback_api_base_url: str | None = None,
+    ) -> None:
         self._api_key = api_key
         self._chat_model = chat_model
         self._embedding_model = embedding_model
         self._chat_timeout_s = 90.0
         self._embedding_timeout_s = 45.0
-        self._client = (
-            OpenAI(
-                api_key=api_key,
-                timeout=self._chat_timeout_s,
-                max_retries=0,
-            )
-            if (api_key and OpenAI is not None)
-            else None
-        )
+        self._embedding_client = self._build_client(api_key=api_key, base_url=api_base_url)
+        self._chat_targets: list[tuple[Any, str]] = []
+        if self._embedding_client is not None:
+            self._chat_targets.append((self._embedding_client, chat_model))
+
+        resolved_fallback_model = (fallback_chat_model or chat_model).strip()
+        fallback_client = self._build_client(api_key=fallback_api_key, base_url=fallback_api_base_url)
+        if fallback_client is not None and resolved_fallback_model:
+            same_key = (api_key or "").strip() == (fallback_api_key or "").strip()
+            same_base_url = (api_base_url or "").strip() == (fallback_api_base_url or "").strip()
+            same_model = resolved_fallback_model == chat_model
+            if not (same_key and same_base_url and same_model):
+                self._chat_targets.append((fallback_client, resolved_fallback_model))
+
+    def _build_client(self, *, api_key: str | None, base_url: str | None) -> Any | None:
+        key = (api_key or "").strip()
+        if not key or OpenAI is None:
+            return None
+        kwargs: dict[str, Any] = {
+            "api_key": key,
+            "timeout": self._chat_timeout_s,
+            "max_retries": 0,
+        }
+        resolved_base_url = (base_url or "").strip()
+        if resolved_base_url:
+            kwargs["base_url"] = resolved_base_url
+        return OpenAI(**kwargs)
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
 
-        if self._client is None:
+        embed_model = (self._embedding_model or "").strip()
+        if embed_model.lower() in {"", "hash", "local", "none", "disabled", "hash-local"}:
+            return [_hash_embedding(text) for text in texts]
+        if self._embedding_client is None:
             return [_hash_embedding(text) for text in texts]
 
         try:
-            response = self._client.embeddings.create(
-                model=self._embedding_model,
+            response = self._embedding_client.embeddings.create(
+                model=embed_model,
                 input=texts,
                 timeout=self._embedding_timeout_s,
             )
@@ -201,7 +232,7 @@ class LLMGateway:
         requested_variants = _variant_names_for_mode(variant_mode)
         rewrite_targets = _rewrite_targets_for_variants(requested_variants)
         real_insights = _extract_real_insights(company, dossier)
-        if self._client is None:
+        if not self._chat_targets:
             if llm_policy == "strict":
                 raise RuntimeError("LLM unavailable: configure OPENAI_API_KEY or set --llm-policy fallback")
             return _fallback_variants(
@@ -460,22 +491,31 @@ class LLMGateway:
         )
 
     def _call_chat_json(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
-        if self._client is None:
+        if not self._chat_targets:
             raise RuntimeError("LLM client unavailable")
-        response = self._client.chat.completions.create(
-            model=self._chat_model,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            timeout=self._chat_timeout_s,
-        )
-        raw_content = response.choices[0].message.content or "{}"
-        parsed = json.loads(raw_content)
-        if not isinstance(parsed, dict):
-            raise RuntimeError("Unexpected LLM response format")
-        return parsed
+        last_exc: Exception | None = None
+        for client, model in self._chat_targets:
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    timeout=self._chat_timeout_s,
+                )
+                raw_content = response.choices[0].message.content or "{}"
+                parsed = json.loads(raw_content)
+                if not isinstance(parsed, dict):
+                    raise RuntimeError("Unexpected LLM response format")
+                return parsed
+            except Exception as exc:
+                last_exc = exc
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("LLM client unavailable")
 
     def _repair_variant(
         self,
@@ -487,7 +527,7 @@ class LLMGateway:
         rewrite_targets: dict[str, tuple[float, float]],
         quality_flags: list[str],
     ) -> tuple[str, str] | None:
-        if self._client is None:
+        if not self._chat_targets:
             return None
         min_rewrite, max_rewrite = rewrite_targets.get(variant_name.upper(), (0.25, 0.40))
 

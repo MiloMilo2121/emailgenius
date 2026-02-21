@@ -95,6 +95,7 @@ class CampaignTests(unittest.TestCase):
         return AppConfig(
             database_url="postgresql://local",
             openai_api_key=None,
+            openai_base_url=None,
             openai_chat_model="gpt-5",
             openai_embedding_model="text-embedding-3-small",
             google_service_account_json=None,

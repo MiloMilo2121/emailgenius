@@ -197,8 +197,12 @@ def _store(config: AppConfig) -> PostgresStore:
 def _llm(config: AppConfig) -> LLMGateway:
     return LLMGateway(
         api_key=config.openai_api_key,
+        api_base_url=config.openai_base_url,
         chat_model=config.openai_chat_model,
         embedding_model=config.openai_embedding_model,
+        fallback_api_key=config.openai_fallback_api_key,
+        fallback_api_base_url=config.openai_fallback_base_url,
+        fallback_chat_model=config.openai_fallback_chat_model,
     )
 
 

@@ -30,12 +30,20 @@ playwright install chromium
 
 ```bash
 export EMAILGENIUS_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/emailgenius"
-export OPENAI_API_KEY="..."
-export EMAILGENIUS_OPENAI_CHAT_MODEL="gpt-5"
-export EMAILGENIUS_OPENAI_EMBED_MODEL="text-embedding-3-small"
+export OPENAI_API_KEY="..."                              # provider primario (OpenAI-compatible)
+export OPENAI_BASE_URL="https://open.bigmodel.cn/api/paas/v4/"
+export EMAILGENIUS_OPENAI_CHAT_MODEL="glm-4.7-flashx"
+export EMAILGENIUS_OPENAI_EMBED_MODEL="hash-local"      # embedding locale gratuito
+export EMAILGENIUS_OPENAI_FALLBACK_API_KEY="..."        # opzionale provider secondario
+export EMAILGENIUS_OPENAI_FALLBACK_BASE_URL="https://api.deepseek.com"
+export EMAILGENIUS_OPENAI_FALLBACK_CHAT_MODEL="deepseek-chat"
 export GOOGLE_SERVICE_ACCOUNT_JSON="/absolute/path/service-account.json"
 export EMAILGENIUS_RETENTION_DAYS="90"
 ```
+
+`OPENAI_BASE_URL`/`EMAILGENIUS_OPENAI_BASE_URL` permette di usare endpoint OpenAI-compatible
+(es. Z.AI, DeepSeek, Kimi). Se il provider primario fallisce, `EMAILGENIUS_OPENAI_FALLBACK_*`
+viene usato come backup.
 
 ## Parent profile (YAML)
 
@@ -153,5 +161,5 @@ PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 - LinkedIn: solo link pubblici, nessun login/scraping autenticato.
 - Nessun invio automatico email in questa release.
-- Default `--llm-policy strict`: senza `OPENAI_API_KEY` la campagna si ferma.
+- Default `--llm-policy strict`: senza almeno una key (`OPENAI_API_KEY` o `EMAILGENIUS_OPENAI_FALLBACK_API_KEY`) la campagna si ferma.
 - Usa `--llm-policy fallback` per degradare a copy deterministico locale.
