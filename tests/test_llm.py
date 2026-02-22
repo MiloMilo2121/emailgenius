@@ -168,7 +168,7 @@ class LLMFallbackTests(unittest.TestCase):
         )
         body_a = next(item.body for item in variants if item.variant == "A")
         self.assertIn("Significato:", body_a)
-        self.assertIn("Notizia recente:", body_a)
+        self.assertIn("Evento recente aziendale:", body_a)
 
     def test_coerce_variants_raw_accepts_dict_mapping(self) -> None:
         raw = {

@@ -10,6 +10,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from .guardrails import apply_claim_guard
+from .search import is_event_news_hit
 from .types import DraftEmailVariant, EnrichmentDossier, LeadCompany, LeadContact, ParentProfile
 
 try:
@@ -624,12 +625,20 @@ def _extract_real_insights(company: LeadCompany, dossier: EnrichmentDossier) -> 
         insights.append((fact_clean, meaning_clean))
 
     if dossier.news_items:
-        title = str(dossier.news_items[0].title or "").strip()
+        event_hit = next((item for item in dossier.news_items if is_event_news_hit(item)), None)
+        selected_hit = event_hit or dossier.news_items[0]
+        title = str(selected_hit.title or "").strip()
         if title:
-            _push(
-                f"Notizia recente: {title}",
-                "significa che c'e' movimento strategico in corso e conviene proporre un confronto operativo ora.",
-            )
+            if event_hit is not None:
+                _push(
+                    f"Evento recente aziendale: {title}",
+                    "indica una fase attiva (investimenti, fiere o partnership) in cui ha senso proporre una verifica operativa su opportunita finanziabili.",
+                )
+            else:
+                _push(
+                    f"Notizia recente: {title}",
+                    "significa che c'e' movimento strategico in corso e conviene proporre un confronto operativo ora.",
+                )
 
     industry = (company.industry or "").strip()
     if industry:

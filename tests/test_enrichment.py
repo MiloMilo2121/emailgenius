@@ -45,6 +45,7 @@ class NebulaEnrichmentMachineTests(unittest.TestCase):
         self.assertGreaterEqual(nebula.score, 0.45)
         self.assertTrue(any("NebulaForge" in item for item in snippets))
         self.assertTrue(any(item.startswith("[Hook]") for item in snippets))
+        self.assertTrue(any("Evento recente:" in item for item in nebula.personalization_hooks))
 
     def test_low_signal_profile_marks_missing_data(self) -> None:
         company = LeadCompany(

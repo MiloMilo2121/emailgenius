@@ -1,8 +1,10 @@
 import unittest
 
 from emailgenius.search import (
+    build_company_news_queries,
     build_news_query,
     build_site_query,
+    is_event_news_hit,
     parse_bing_html,
     parse_bing_news_html,
     parse_duckduckgo_html,
@@ -15,6 +17,12 @@ class SearchTests(unittest.TestCase):
     def test_build_queries(self) -> None:
         self.assertEqual(build_site_query("Acme", "Vicenza"), "Acme Vicenza sito ufficiale")
         self.assertEqual(build_news_query("Acme", "Vicenza"), "Acme Vicenza news")
+
+    def test_build_company_news_queries_adds_event_and_official_site_queries(self) -> None:
+        queries = build_company_news_queries("Acme", "Vicenza", official_domain="acme.it")
+        self.assertGreaterEqual(len(queries), 4)
+        self.assertIn("investimenti fiere partnership", queries[0])
+        self.assertTrue(any(query.startswith("site:acme.it") for query in queries))
 
     def test_parse_duckduckgo_results(self) -> None:
         html = """
@@ -56,6 +64,12 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(len(hits), 2)
         self.assertEqual(hits[0].url, "https://news.example.com/acme-ricavi")
         self.assertEqual(hits[0].title, "Acme ricavi record nel 2026")
+
+    def test_is_event_news_hit_detects_event_keywords(self) -> None:
+        event_hit = SearchHit(title="Acme investe in un nuovo impianto", url="https://news.example.com/acme-impianto")
+        neutral_hit = SearchHit(title="Acme aggiorna il sito corporate", url="https://news.example.com/acme-sito")
+        self.assertTrue(is_event_news_hit(event_hit))
+        self.assertFalse(is_event_news_hit(neutral_hit))
 
     def test_select_official_site_prefers_company_domain(self) -> None:
         candidates = [

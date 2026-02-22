@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from urllib.parse import urlparse
 
 from .browser import fetch_website_snapshot
-from .search import discover_company_and_news, search_news_web
+from .search import collect_company_news, discover_company_and_news, is_event_news_hit
 from .types import EnrichmentDossier, LeadCompany, LeadContact, SearchHit
 from .utils import compact_lines
 
@@ -104,8 +104,13 @@ async def build_enrichment_dossier(
             evidence.append("Sito non analizzabile in modo completo")
 
     if not news_items:
-        news_query = f"{company.company_name} {city} news".strip()
-        news_items = search_news_web(news_query, max_results=6)
+        selected_site = SearchHit(title=company.company_name, url=website) if website else None
+        _, news_items = collect_company_news(
+            company_name=company.company_name,
+            city=city,
+            selected_site=selected_site,
+            news_max_results=6,
+        )
 
     sources.extend(hit.url for hit in news_items)
 
@@ -318,7 +323,11 @@ def _personalization_hooks(
     if company.keywords:
         hooks.append(f"Keyword azienda: {company.keywords}")
     if dossier.news_items:
-        hooks.append(f"News recente: {dossier.news_items[0].title}")
+        event_title = _first_event_news_title(dossier.news_items)
+        if event_title:
+            hooks.append(f"Evento recente: {event_title}")
+        else:
+            hooks.append(f"News recente: {dossier.news_items[0].title}")
     if company.linkedin_company:
         hooks.append(f"LinkedIn aziendale: {company.linkedin_company}")
 
@@ -362,9 +371,20 @@ def _missing_data_flags(
         flags.append("missing_site_summary_depth")
     if not dossier.news_items:
         flags.append("missing_news_context")
+    elif not any(is_event_news_hit(item) for item in dossier.news_items):
+        flags.append("missing_company_event_news")
     if not dossier.sources:
         flags.append("missing_verified_sources")
     return flags
+
+
+def _first_event_news_title(news_items: list[SearchHit]) -> str:
+    for item in news_items:
+        if is_event_news_hit(item):
+            title = str(item.title or "").strip()
+            if title:
+                return title
+    return ""
 
 
 def _dedupe_keep_order(items: list[str], *, limit: int) -> list[str]:
