@@ -94,6 +94,8 @@ def run_campaign(
             enrichment_mode=enrichment_mode,
             max_retries=max_retries,
             backoff_base_seconds=backoff_base_seconds,
+            cost_cap_eur=cost_cap_eur,
+            force_cost_override=force_cost_override,
             workspace_folder_id=workspace_folder_id or config.workspace_folder_id,
         )
 
@@ -361,6 +363,8 @@ def _run_campaign_drive_mode(
     enrichment_mode: str,
     max_retries: int,
     backoff_base_seconds: float,
+    cost_cap_eur: float,
+    force_cost_override: bool,
     workspace_folder_id: str | None,
 ) -> tuple[CampaignSummary, Path, list[dict[str, object]]]:
     if not workspace_folder_id:
@@ -391,6 +395,15 @@ def _run_campaign_drive_mode(
     if not lead_rows:
         raise ValueError("No lead rows found in Drive folder Input Leads")
 
+    llm_items_planned = len({item.idempotency_key for item in lead_rows})
+    estimated_cost_eur = _estimate_cost_eur(llm_items_planned)
+    print(f"[drive-preflight] llm_items_planned={llm_items_planned} (rows by idempotency key)")
+    if estimated_cost_eur > cost_cap_eur and not force_cost_override:
+        raise ValueError(
+            f"Estimated campaign cost {estimated_cost_eur:.2f} EUR exceeds cap {cost_cap_eur:.2f} EUR. "
+            "Use --force-cost-override to continue."
+        )
+
     print(
         f"[drive-sync] profiles synced={profiles_report.synced} failed={profiles_report.failed} "
         f"knowledge synced={knowledge_report.synced} failed={knowledge_report.failed}"
@@ -412,6 +425,7 @@ def _run_campaign_drive_mode(
     rows_failed = 0
     warnings_total = 0
     processed_companies = 0
+    llm_items_attempted = 0
     export_rows: list[dict[str, object]] = []
     drive_export_items: list[dict[str, object]] = []
 
@@ -485,6 +499,7 @@ def _run_campaign_drive_mode(
                     snippets.extend(str(item.get("content") or "") for item in search_results if item.get("content"))
             snippets = _dedupe_snippets(snippets, limit=14)
 
+            llm_items_attempted += 1
             sequence = engine.generate_sequence(
                 parent=parent,
                 company=company,
@@ -611,6 +626,9 @@ def _run_campaign_drive_mode(
     )
     write_csv(export_path, export_rows, columns)
 
+    per_item_estimated_cost = estimated_cost_eur / max(llm_items_planned, 1)
+    actual_cost_eur = round(per_item_estimated_cost * llm_items_attempted, 2) if llm_items_planned else 0.0
+
     summary = CampaignSummary(
         campaign_id=campaign_id,
         parent_slug=parent_slug,
@@ -631,8 +649,8 @@ def _run_campaign_drive_mode(
         rows_skipped=0,
         rows_generated_ok=rows_generated_ok,
         rows_failed=rows_failed,
-        estimated_cost_eur=round(rows_total * 0.05, 2),
-        actual_cost_eur=round((rows_generated_ok + rows_failed) * 0.05, 2),
+        estimated_cost_eur=estimated_cost_eur,
+        actual_cost_eur=actual_cost_eur,
     )
     store.finalize_campaign(campaign_id, summary)
     store.purge_expired_campaign_data(config.retention_days)

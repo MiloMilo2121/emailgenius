@@ -125,7 +125,8 @@ def sync_knowledge_base(
     files = _list_files_in_folder(drive_client, knowledge_folder_id)
     report.scanned = len(files)
 
-    parent_slug = _resolve_default_parent_slug(store)
+    known_parent_slugs = {str(item.slug).strip() for item in store.list_parent_profiles() if str(item.slug).strip()}
+    active_parent_slug = store.get_active_parent_slug()
     for item in files:
         file_id = str(item.get("id") or "")
         name = str(item.get("name") or "")
@@ -139,10 +140,22 @@ def sync_knowledge_base(
             report.skipped += 1
             continue
 
+        parent_slug = _resolve_parent_slug_for_knowledge_file(
+            file_name=name,
+            known_parent_slugs=known_parent_slugs,
+            active_parent_slug=active_parent_slug,
+        )
+        if not parent_slug:
+            store.upsert_drive_file_sync_state(
+                file_id=file_id,
+                modified_time=modified_time,
+                kind="knowledge",
+                status="FAILED_PARENT_MAPPING",
+            )
+            report.failed += 1
+            continue
+
         try:
-            if not parent_slug:
-                report.failed += 1
-                continue
             payload = _download_drive_bytes(drive_client, file_id)
             with tempfile.TemporaryDirectory() as tmpdir:
                 local_path = Path(tmpdir) / name
@@ -399,13 +412,35 @@ def _move_file_to_folder(drive_client: Any, *, file_id: str, target_folder_id: s
     )
 
 
-def _resolve_default_parent_slug(store: PostgresStore) -> str | None:
-    active = store.get_active_parent_slug()
-    if active:
-        return active
-    profiles = store.list_parent_profiles()
-    if len(profiles) == 1:
-        return profiles[0].slug
+def _resolve_parent_slug_for_knowledge_file(
+    *,
+    file_name: str,
+    known_parent_slugs: set[str],
+    active_parent_slug: str | None,
+) -> str | None:
+    normalized_known = {slugify(item) for item in known_parent_slugs if item}
+    if not normalized_known:
+        active = slugify(active_parent_slug or "")
+        return active or None
+
+    stem = Path(file_name).stem.strip()
+    candidates: list[str] = []
+
+    if "__" in stem:
+        candidates.append(stem.split("__", 1)[0])
+    bracket_match = re.match(r"^\[([^\]]+)\]", stem)
+    if bracket_match:
+        candidates.append(bracket_match.group(1))
+    candidates.append(stem)
+
+    for candidate in candidates:
+        slug = slugify(candidate)
+        if slug in normalized_known:
+            return slug
+
+    if len(normalized_known) == 1:
+        return next(iter(normalized_known))
+
     return None
 
 

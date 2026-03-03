@@ -177,6 +177,62 @@ class CampaignDriveTests(unittest.TestCase):
         payload = store.inserted[0][1]
         self.assertEqual(payload.get("idempotency_key"), "key-1")
 
+    def test_drive_mode_respects_cost_cap_without_force_override(self) -> None:
+        profile = self._profile()
+        store = _FakeStore(profile)
+        llm = _FakeLLM()
+        lead_row = DriveLeadRow(
+            raw_row={"companyName": "Beta SRL", "Email": "anna@example.com"},
+            canonical_row={
+                "Company Name": "Beta SRL",
+                "Cleaned Company Name": "Beta SRL",
+                "Company Website Full": "",
+                "Email": "anna@example.com",
+                "Full Name": "Anna Verdi",
+                "parent_slug": "azienda-a",
+            },
+            sheet_id="sheet-1",
+            sheet_name="Leads",
+            tab_name="Sheet1",
+            row_index=2,
+            modified_time="2026-03-03T10:00:00Z",
+            idempotency_key="key-1",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch(
+            "emailgenius.campaign.build_workspace_clients",
+            return_value=type("C", (), {"drive": object(), "docs": object(), "sheets": object()})(),
+        ), patch(
+            "emailgenius.campaign.sync_parent_profiles", return_value=SyncReport(synced=1)
+        ), patch(
+            "emailgenius.campaign.sync_knowledge_base", return_value=SyncReport(synced=1)
+        ), patch(
+            "emailgenius.campaign.fetch_leads_sheet", return_value=[lead_row]
+        ), patch(
+            "emailgenius.campaign.CampaignAgentEngine", _FakeEngine
+        ), patch(
+            "emailgenius.campaign.export_sequence_to_drive",
+            return_value=ExportResult(docs_created=1, status_rows_written=1, doc_urls=["https://docs.example/1"]),
+        ), patch(
+            "emailgenius.campaign.run_nebula_enrichment_machine",
+            return_value=type("Nebula", (), {"to_prompt_snippets": lambda self, limit=10: ["n1"]})(),
+        ):
+            with self.assertRaises(ValueError):
+                run_campaign(
+                    config=self._config(),
+                    store=store,
+                    llm=llm,
+                    parent_slug="azienda-a",
+                    leads_csv_path=None,
+                    out_dir=str(Path(tmpdir) / "out"),
+                    sheet_id=None,
+                    io_mode="drive",
+                    workspace_folder_id="workspace-1",
+                    llm_policy="fallback",
+                    cost_cap_eur=0.01,
+                    force_cost_override=False,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

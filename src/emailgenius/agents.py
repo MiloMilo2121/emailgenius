@@ -37,6 +37,7 @@ class CampaignAgentEngine:
         marketing_snippets: list[str],
         llm_policy: str = "strict",
     ) -> SequenceResult:
+        resolved_llm_policy = self._normalize_llm_policy(llm_policy)
         if StateGraph is None:
             state = self._run_state_machine_fallback(
                 parent=parent,
@@ -44,7 +45,7 @@ class CampaignAgentEngine:
                 contact=contact,
                 dossier=dossier,
                 marketing_snippets=marketing_snippets,
-                llm_policy=llm_policy,
+                llm_policy=resolved_llm_policy,
             )
             return self._to_sequence_result(state)
 
@@ -73,7 +74,7 @@ class CampaignAgentEngine:
             "contact": contact,
             "dossier": dossier,
             "marketing_snippets": marketing_snippets,
-            "llm_policy": llm_policy,
+            "llm_policy": resolved_llm_policy,
             "retry_count": 0,
             "attack_angle": "",
             "trigger_facts": [],
@@ -92,7 +93,7 @@ class CampaignAgentEngine:
                 contact=contact,
                 dossier=dossier,
                 marketing_snippets=marketing_snippets,
-                llm_policy=llm_policy,
+                llm_policy=resolved_llm_policy,
             )
             return self._to_sequence_result(state)
 
@@ -183,6 +184,7 @@ class CampaignAgentEngine:
                 "Output solo JSON con chiavi: subject, body, goal."
             ),
             payload=prompt_payload,
+            llm_policy=str(state.get("llm_policy") or "strict"),
         )
 
         subject = format_email_subject(str(parsed.get("subject") or default_subject))
@@ -232,6 +234,7 @@ class CampaignAgentEngine:
                 "Output JSON con chiave steps (array di oggetti con step_id, subject, body, goal)."
             ),
             payload=prompt_payload,
+            llm_policy=str(state.get("llm_policy") or "strict"),
         )
         generated_steps = parsed.get("steps") if isinstance(parsed.get("steps"), list) else []
 
@@ -290,15 +293,37 @@ class CampaignAgentEngine:
     def _after_compliance(self, state: dict[str, Any]) -> str:
         return "rewrite" if bool(state.get("needs_rewrite")) else "done"
 
-    def _safe_llm_json(self, *, system_prompt: str, payload: dict[str, object]) -> dict[str, Any]:
+    def _safe_llm_json(
+        self,
+        *,
+        system_prompt: str,
+        payload: dict[str, object],
+        llm_policy: str,
+    ) -> dict[str, Any]:
+        resolved_policy = self._normalize_llm_policy(llm_policy)
         call = getattr(self._llm, "_call_chat_json", None)
         if not callable(call):
+            if resolved_policy == "strict":
+                raise RuntimeError("LLM unavailable: configure OPENAI_API_KEY or set llm_policy=fallback")
             return {}
         try:
             response = call(system_prompt=system_prompt, user_prompt=json.dumps(payload, ensure_ascii=False))
-        except Exception:
+        except Exception as exc:
+            if resolved_policy == "strict":
+                raise RuntimeError(f"LLM generation failed in strict mode: {exc}") from exc
             return {}
-        return response if isinstance(response, dict) else {}
+        if isinstance(response, dict):
+            return response
+        if resolved_policy == "strict":
+            raise RuntimeError("LLM returned invalid non-JSON response in strict mode")
+        return {}
+
+    @staticmethod
+    def _normalize_llm_policy(llm_policy: str) -> str:
+        policy = (llm_policy or "strict").strip().lower()
+        if policy not in {"strict", "fallback"}:
+            raise ValueError("llm_policy must be one of: strict, fallback")
+        return policy
 
     def _fallback_step(
         self,

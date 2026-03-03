@@ -38,6 +38,10 @@ class _FakeLLM:
         }
 
 
+class _NoChatLLM:
+    pass
+
+
 class AgentEngineTests(unittest.TestCase):
     def _parent(self) -> ParentProfile:
         return ParentProfile(
@@ -118,6 +122,32 @@ class AgentEngineTests(unittest.TestCase):
 
         flags = sequence.global_risk_flags
         self.assertTrue(any(flag.startswith("claim_") or flag.startswith("no_go:") for flag in flags))
+
+    def test_strict_mode_raises_when_llm_chat_unavailable(self) -> None:
+        engine = CampaignAgentEngine(llm=_NoChatLLM())  # type: ignore[arg-type]
+        dossier = EnrichmentDossier(site_summary="base")
+        with self.assertRaises(RuntimeError):
+            engine.generate_sequence(
+                parent=self._parent(),
+                company=self._company(),
+                contact=self._contact(),
+                dossier=dossier,
+                marketing_snippets=[],
+                llm_policy="strict",
+            )
+
+    def test_fallback_mode_survives_when_llm_chat_unavailable(self) -> None:
+        engine = CampaignAgentEngine(llm=_NoChatLLM())  # type: ignore[arg-type]
+        dossier = EnrichmentDossier(site_summary="base")
+        sequence = engine.generate_sequence(
+            parent=self._parent(),
+            company=self._company(),
+            contact=self._contact(),
+            dossier=dossier,
+            marketing_snippets=[],
+            llm_policy="fallback",
+        )
+        self.assertEqual([step.step_id for step in sequence.steps], ["E1", "E2", "E3", "BREAKUP"])
 
 
 if __name__ == "__main__":

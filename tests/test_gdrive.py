@@ -4,7 +4,9 @@ import unittest
 from unittest.mock import patch
 
 from emailgenius.gdrive import _canonicalize_lead_row
+from emailgenius.gdrive import _resolve_parent_slug_for_knowledge_file
 from emailgenius.gdrive import _render_sequence_doc
+from emailgenius.gdrive import sync_knowledge_base
 from emailgenius.gdrive import sync_parent_profiles
 from emailgenius.types import SequenceResult, SequenceStep
 
@@ -15,6 +17,25 @@ class _FakeStore:
 
     def upsert_parent_profile(self, profile, *, set_active: bool = False) -> None:
         self.profiles.append(profile)
+
+
+class _FakeKnowledgeStore:
+    def __init__(self, slugs: list[str], active_slug: str | None = None) -> None:
+        self._slugs = slugs
+        self._active_slug = active_slug
+        self.sync_updates: list[tuple[str, str, str, str]] = []
+
+    def list_parent_profiles(self):
+        return [type("P", (), {"slug": slug})() for slug in self._slugs]
+
+    def get_active_parent_slug(self):
+        return self._active_slug
+
+    def is_drive_file_synced(self, *, file_id: str, modified_time: str, kind: str) -> bool:
+        return False
+
+    def upsert_drive_file_sync_state(self, *, file_id: str, modified_time: str, kind: str, status: str) -> None:
+        self.sync_updates.append((file_id, modified_time, kind, status))
 
 
 class GDriveTests(unittest.TestCase):
@@ -78,6 +99,51 @@ compliance_notes: [pubblico]
         self.assertIn("[E2]", text)
         self.assertIn("[E3]", text)
         self.assertIn("[BREAKUP]", text)
+
+    def test_resolve_parent_slug_for_knowledge_file_from_filename_prefix(self) -> None:
+        resolved = _resolve_parent_slug_for_knowledge_file(
+            file_name="azienda-b__brochure.pdf",
+            known_parent_slugs={"azienda-a", "azienda-b"},
+            active_parent_slug="azienda-a",
+        )
+        self.assertEqual(resolved, "azienda-b")
+
+    def test_resolve_parent_slug_for_knowledge_file_requires_explicit_mapping_with_multiple_parents(self) -> None:
+        resolved = _resolve_parent_slug_for_knowledge_file(
+            file_name="brochure-generica.pdf",
+            known_parent_slugs={"azienda-a", "azienda-b"},
+            active_parent_slug="azienda-a",
+        )
+        self.assertIsNone(resolved)
+
+    def test_resolve_parent_slug_for_knowledge_file_single_parent_fallback(self) -> None:
+        resolved = _resolve_parent_slug_for_knowledge_file(
+            file_name="brochure-generica.pdf",
+            known_parent_slugs={"azienda-a"},
+            active_parent_slug=None,
+        )
+        self.assertEqual(resolved, "azienda-a")
+
+    def test_sync_knowledge_base_marks_failed_when_parent_mapping_is_ambiguous(self) -> None:
+        store = _FakeKnowledgeStore(slugs=["azienda-a", "azienda-b"], active_slug="azienda-a")
+        drive_file = {
+            "id": "file-1",
+            "name": "brochure-generica.pdf",
+            "modifiedTime": "2026-03-03T10:00:00Z",
+        }
+        with patch("emailgenius.gdrive._ensure_subfolder", side_effect=["knowledge-folder", "processed-folder"]), patch(
+            "emailgenius.gdrive._list_files_in_folder", return_value=[drive_file]
+        ), patch("emailgenius.gdrive._download_drive_bytes") as download_mock, patch(
+            "emailgenius.gdrive.ingest_knowledge_file"
+        ) as ingest_mock, patch("emailgenius.gdrive._move_file_to_folder") as move_mock:
+            report = sync_knowledge_base("root", store, llm=object(), drive_client=object())
+
+        self.assertEqual(report.failed, 1)
+        self.assertEqual(report.synced, 0)
+        self.assertEqual(store.sync_updates[-1][3], "FAILED_PARENT_MAPPING")
+        download_mock.assert_not_called()
+        ingest_mock.assert_not_called()
+        move_mock.assert_not_called()
 
 
 if __name__ == "__main__":
