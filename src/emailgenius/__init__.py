@@ -18,4 +18,7 @@ __all__ = [
     "outreach",
     "search",
     "pipeline",
+    "google_auth",
+    "gdrive",
+    "agents",
 ]

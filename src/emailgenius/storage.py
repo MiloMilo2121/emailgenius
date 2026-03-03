@@ -120,11 +120,42 @@ class PostgresStore:
             CREATE INDEX IF NOT EXISTS idx_agent_memories_parent_kind_created
             ON agent_memories(parent_slug, kind, created_at DESC)
             """,
+            """
+            CREATE TABLE IF NOT EXISTS drive_file_sync_state (
+                file_id TEXT NOT NULL,
+                modified_time TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (file_id, modified_time, kind)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS drive_row_ingestions (
+                id UUID PRIMARY KEY,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                sheet_id TEXT NOT NULL,
+                tab_name TEXT NOT NULL,
+                row_index INT NOT NULL,
+                modified_time TEXT NOT NULL,
+                campaign_id UUID,
+                record_id UUID,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_drive_row_ingestions_status
+            ON drive_row_ingestions(status, updated_at DESC)
+            """,
         ]
         with self._connect() as conn:
             with conn.cursor() as cur:
                 for stmt in ddl:
                     cur.execute(stmt)
+        self._setup_langgraph_checkpoint_schema()
 
     def upsert_parent_profile(self, profile: ParentProfile, *, set_active: bool = False) -> None:
         payload = json.dumps(parent_profile_to_dict(profile), ensure_ascii=False)
@@ -369,6 +400,7 @@ class PostgresStore:
             },
             "variants": [asdict(item) for item in result.variants],
             "recommended_variant": result.recommended_variant,
+            "sequence_result": asdict(result.sequence_result) if result.sequence_result else None,
             "approval": asdict(result.approval),
             "risk_flags": result.risk_flags,
             "created_at": utc_now_iso(),
@@ -509,6 +541,121 @@ class PostgresStore:
                     item["memory_json"] = payload if isinstance(payload, dict) else {}
                     rows.append(item)
                 return rows
+
+    def is_drive_file_synced(self, *, file_id: str, modified_time: str, kind: str) -> bool:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM drive_file_sync_state
+                    WHERE file_id=%s AND modified_time=%s AND kind=%s AND status='SYNCED'
+                    """,
+                    (file_id, modified_time, kind),
+                )
+                return cur.fetchone() is not None
+
+    def upsert_drive_file_sync_state(
+        self,
+        *,
+        file_id: str,
+        modified_time: str,
+        kind: str,
+        status: str,
+    ) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO drive_file_sync_state(file_id, modified_time, kind, status)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (file_id, modified_time, kind)
+                    DO UPDATE SET
+                        status = EXCLUDED.status,
+                        updated_at = NOW()
+                    """,
+                    (file_id, modified_time, kind, status),
+                )
+
+    def begin_drive_row_ingestion(
+        self,
+        *,
+        idempotency_key: str,
+        sheet_id: str,
+        tab_name: str,
+        row_index: int,
+        modified_time: str,
+        campaign_id: str,
+    ) -> bool:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO drive_row_ingestions(
+                        id, idempotency_key, sheet_id, tab_name, row_index, modified_time, campaign_id, status
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'RUNNING')
+                    ON CONFLICT (idempotency_key)
+                    DO NOTHING
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        idempotency_key,
+                        sheet_id,
+                        tab_name,
+                        int(row_index),
+                        modified_time,
+                        campaign_id,
+                    ),
+                )
+                return cur.rowcount > 0
+
+    def complete_drive_row_ingestion(
+        self,
+        *,
+        idempotency_key: str,
+        record_id: str | None,
+        status: str,
+        error_message: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE drive_row_ingestions
+                    SET status=%s,
+                        record_id=%s,
+                        error_message=%s,
+                        updated_at=NOW()
+                    WHERE idempotency_key=%s
+                    """,
+                    (status, record_id, error_message, idempotency_key),
+                )
+
+    def build_langgraph_checkpointer(self) -> Any | None:
+        try:
+            from langgraph.checkpoint.postgres import PostgresSaver
+        except Exception:
+            return None
+        try:
+            return PostgresSaver.from_conn_string(self._dsn)
+        except Exception:
+            return None
+
+    def _setup_langgraph_checkpoint_schema(self) -> None:
+        try:
+            from langgraph.checkpoint.postgres import PostgresSaver
+        except Exception:
+            return
+        try:
+            saver = PostgresSaver.from_conn_string(self._dsn)
+            setup = getattr(saver, "setup", None)
+            if callable(setup):
+                setup()
+            close = getattr(saver, "close", None)
+            if callable(close):
+                close()
+        except Exception:
+            return
 
     def purge_expired_campaign_data(self, retention_days: int) -> int:
         with self._connect() as conn:

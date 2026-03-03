@@ -6,8 +6,17 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .agents import CampaignAgentEngine
 from .config import AppConfig
 from .enrichment import build_enrichment_dossier_sync, run_nebula_enrichment_machine
+from .gdrive import (
+    DriveLeadRow,
+    build_workspace_clients,
+    export_sequence_to_drive,
+    fetch_leads_sheet,
+    sync_knowledge_base,
+    sync_parent_profiles,
+)
 from .guardrails import apply_claim_guard
 from .leads import (
     format_header_mapping,
@@ -20,7 +29,7 @@ from .leads import (
 from .llm import LLMGateway, format_email_body, format_email_subject, render_seed_template
 from .sheets import approval_columns, publish_campaign_to_sheets
 from .storage import PostgresStore
-from .types import ApprovalRecord, CampaignCompanyResult, CampaignSummary, DraftEmailVariant, EnrichmentDossier
+from .types import ApprovalRecord, CampaignCompanyResult, CampaignSummary, DraftEmailVariant, EnrichmentDossier, SequenceResult
 from .utils import utc_now_iso, write_csv
 
 
@@ -42,7 +51,7 @@ def run_campaign(
     store: PostgresStore,
     llm: LLMGateway,
     parent_slug: str,
-    leads_csv_path: str,
+    leads_csv_path: str | None,
     out_dir: str,
     sheet_id: str | None,
     sheet_title: str | None = None,
@@ -61,7 +70,33 @@ def run_campaign(
     backoff_base_seconds: float = 1.0,
     cost_cap_eur: float = 50.0,
     force_cost_override: bool = False,
+    io_mode: str = "local",
+    workspace_folder_id: str | None = None,
 ) -> tuple[CampaignSummary, Path, list[dict[str, object]]]:
+    resolved_io_mode = (io_mode or "local").strip().lower()
+    if resolved_io_mode not in {"local", "drive"}:
+        raise ValueError("io_mode must be one of: local, drive")
+
+    if resolved_io_mode == "drive":
+        return _run_campaign_drive_mode(
+            config=config,
+            store=store,
+            llm=llm,
+            parent_slug=parent_slug,
+            out_dir=out_dir,
+            sheet_id=sheet_id,
+            sheet_title=sheet_title,
+            gsheets_auth=gsheets_auth,
+            headless=headless,
+            variant_mode=variant_mode,
+            output_schema=output_schema,
+            llm_policy=llm_policy,
+            enrichment_mode=enrichment_mode,
+            max_retries=max_retries,
+            backoff_base_seconds=backoff_base_seconds,
+            workspace_folder_id=workspace_folder_id or config.workspace_folder_id,
+        )
+
     if stages != "all":
         raise ValueError("Current release supports only --stages all")
     if recipient_mode not in {"company", "row"}:
@@ -76,6 +111,9 @@ def run_campaign(
     parent = store.get_parent_profile(parent_slug)
     if parent is None:
         raise ValueError(f"Parent profile not found for slug: {parent_slug}")
+
+    if not leads_csv_path:
+        raise ValueError("leads_csv_path is required when io_mode=local")
 
     csv_data = read_leads_csv_detailed(leads_csv_path)
     preflight = preflight_leads(csv_data)
@@ -291,6 +329,8 @@ def run_campaign(
         variant_mode=variant_mode,
         output_schema=output_schema,
         llm_policy=llm_policy,
+        io_mode="local",
+        workspace_folder_id=None,
         rows_total=preflight.rows_total,
         rows_valid=preflight.rows_valid,
         rows_skipped=preflight.rows_skipped,
@@ -302,6 +342,321 @@ def run_campaign(
     store.finalize_campaign(campaign_id, summary)
     store.purge_expired_campaign_data(config.retention_days)
     return summary, export_path, export_rows
+
+
+def _run_campaign_drive_mode(
+    *,
+    config: AppConfig,
+    store: PostgresStore,
+    llm: LLMGateway,
+    parent_slug: str,
+    out_dir: str,
+    sheet_id: str | None,
+    sheet_title: str | None,
+    gsheets_auth: str,
+    headless: bool,
+    variant_mode: str,
+    output_schema: str,
+    llm_policy: str,
+    enrichment_mode: str,
+    max_retries: int,
+    backoff_base_seconds: float,
+    workspace_folder_id: str | None,
+) -> tuple[CampaignSummary, Path, list[dict[str, object]]]:
+    if not workspace_folder_id:
+        raise ValueError("workspace_folder_id is required when io_mode=drive")
+
+    auth_mode = (gsheets_auth or "auto").lower()
+    if auth_mode not in {"auto", "service_account", "oauth"}:
+        raise ValueError("gsheets_auth must be one of: auto, service_account, oauth")
+
+    service_account_json = config.google_service_account_json
+    auth_interactive = auth_mode == "oauth"
+    if auth_mode == "service_account" and not service_account_json:
+        raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON is required for gsheets_auth=service_account")
+    if auth_mode == "oauth":
+        service_account_json = None
+    if auth_mode == "auto" and not service_account_json:
+        # Keep backward-compatible local behavior while enabling drive mode via OAuth when needed.
+        auth_interactive = True
+
+    clients = build_workspace_clients(
+        service_account_json=service_account_json,
+        interactive=auth_interactive,
+    )
+
+    profiles_report = sync_parent_profiles(workspace_folder_id, store, clients.drive)
+    knowledge_report = sync_knowledge_base(workspace_folder_id, store, llm, clients.drive)
+    lead_rows = fetch_leads_sheet(workspace_folder_id, clients.sheets, clients.drive)
+    if not lead_rows:
+        raise ValueError("No lead rows found in Drive folder Input Leads")
+
+    print(
+        f"[drive-sync] profiles synced={profiles_report.synced} failed={profiles_report.failed} "
+        f"knowledge synced={knowledge_report.synced} failed={knowledge_report.failed}"
+    )
+    print(f"[drive-sync] lead_rows={len(lead_rows)}")
+
+    leads_ref = f"drive://{workspace_folder_id}/Input Leads"
+    campaign_id = store.create_campaign(parent_slug=parent_slug, leads_file=leads_ref, sheet_id=sheet_id)
+
+    checkpointer_builder = getattr(store, "build_langgraph_checkpointer", None)
+    checkpointer = checkpointer_builder() if callable(checkpointer_builder) else None
+    engine = CampaignAgentEngine(llm=llm, checkpointer=checkpointer)
+    effective_enrichment_mode = _resolve_enrichment_mode(recipient_mode="row", enrichment_mode=enrichment_mode)
+    rag_enabled = bool(config.openai_api_key)
+    memory_snippets = _load_email_memory_snippets(store=store, parent_slug=parent_slug, limit=12)
+
+    rows_total = len(lead_rows)
+    rows_generated_ok = 0
+    rows_failed = 0
+    warnings_total = 0
+    processed_companies = 0
+    export_rows: list[dict[str, object]] = []
+    drive_export_items: list[dict[str, object]] = []
+
+    for lead_row in lead_rows:
+        if not store.begin_drive_row_ingestion(
+            idempotency_key=lead_row.idempotency_key,
+            sheet_id=lead_row.sheet_id,
+            tab_name=lead_row.tab_name,
+            row_index=lead_row.row_index,
+            modified_time=lead_row.modified_time,
+            campaign_id=campaign_id,
+        ):
+            continue
+
+        row_parent_slug = _resolve_parent_slug_for_drive_row(store=store, row=lead_row, fallback=parent_slug)
+        parent = store.get_parent_profile(row_parent_slug) if row_parent_slug else None
+        if parent is None:
+            warnings_total += 1
+            rows_failed += 1
+            error_row = _error_row(
+                campaign_id=campaign_id,
+                parent_slug=row_parent_slug or parent_slug,
+                raw_row=lead_row.raw_row,
+                error_code="PARENT_PROFILE_NOT_FOUND",
+                warning_message="Parent profile non trovato per la riga Drive.",
+                output_schema=output_schema,
+            )
+            error_row["idempotency_key"] = lead_row.idempotency_key
+            export_rows.append(error_row)
+            store.complete_drive_row_ingestion(
+                idempotency_key=lead_row.idempotency_key,
+                record_id=None,
+                status="FAILED",
+                error_message="Parent profile non trovato",
+            )
+            continue
+
+        company, contacts = build_company_and_contacts([lead_row.canonical_row])
+        primary_contact = select_primary_contact(contacts)
+
+        try:
+            if company.website and effective_enrichment_mode != "minimal":
+                dossier, discovered_website = build_enrichment_dossier_sync(
+                    company=company,
+                    contact=primary_contact,
+                    headless=headless,
+                    max_extra_pages=0,
+                    snapshot_timeout_ms=18000,
+                )
+                if discovered_website and not company.website:
+                    company.website = discovered_website
+            else:
+                dossier = _minimal_dossier(company_name=company.company_name)
+
+            nebula = run_nebula_enrichment_machine(
+                company=company,
+                contact=primary_contact,
+                dossier=dossier,
+            )
+            snippets = nebula.to_prompt_snippets(limit=10) + memory_snippets
+            if rag_enabled:
+                retrieval_query = _build_retrieval_query(company=company, dossier=dossier)
+                retrieval_embeddings = llm.embed_texts([retrieval_query])
+                if retrieval_embeddings:
+                    search_results = store.search_knowledge_chunks(
+                        parent_slug=row_parent_slug,
+                        kind="marketing",
+                        query_embedding=retrieval_embeddings[0],
+                        top_k=6,
+                    )
+                    snippets.extend(str(item.get("content") or "") for item in search_results if item.get("content"))
+            snippets = _dedupe_snippets(snippets, limit=14)
+
+            sequence = engine.generate_sequence(
+                parent=parent,
+                company=company,
+                contact=primary_contact,
+                dossier=dossier,
+                marketing_snippets=snippets,
+                llm_policy=llm_policy,
+            )
+            risk_flags = sorted(
+                set(sequence.global_risk_flags + [flag for step in sequence.steps for flag in step.risk_flags])
+            )
+
+            result = CampaignCompanyResult(
+                campaign_id=campaign_id,
+                parent_slug=row_parent_slug,
+                company=company,
+                contact=primary_contact,
+                dossier=dossier,
+                variants=[],
+                recommended_variant="",
+                approval=ApprovalRecord(status="PENDING", updated_at=utc_now_iso()),
+                sequence_result=sequence,
+                risk_flags=risk_flags,
+            )
+            selected_step = next((item for item in sequence.steps if item.step_id.upper() == "E1"), None)
+            final_subject = selected_step.subject if selected_step else ""
+            final_body = selected_step.body if selected_step else ""
+            generation_warning = ""
+            if risk_flags:
+                generation_warning = "; ".join(risk_flags)[:240]
+                warnings_total += 1
+
+            export_row = dict(lead_row.raw_row)
+            export_row.update(
+                {
+                    "campaign_id": campaign_id,
+                    "parent_slug": row_parent_slug,
+                    "company_name": company.company_name,
+                    "contact_name": primary_contact.full_name if primary_contact else "",
+                    "contact_title": primary_contact.title if primary_contact else "",
+                    "contact_email": primary_contact.email if primary_contact else "",
+                    "final_subject": final_subject,
+                    "final_body": final_body,
+                    "generation_status": "OK",
+                    "generation_warning": generation_warning,
+                    "error_code": "",
+                    "risk_flags": "; ".join(risk_flags),
+                    "status": "PENDING",
+                    "updated_at": utc_now_iso(),
+                    "idempotency_key": lead_row.idempotency_key,
+                    "sequence_steps": len(sequence.steps),
+                    "attack_angle": sequence.attack_angle,
+                }
+            )
+            record_id = store.insert_campaign_company_result(
+                result,
+                extra_payload={
+                    "raw_row": lead_row.raw_row,
+                    "idempotency_key": lead_row.idempotency_key,
+                    "source_sheet_id": lead_row.sheet_id,
+                    "source_tab_name": lead_row.tab_name,
+                    "source_row_index": lead_row.row_index,
+                    "source_modified_time": lead_row.modified_time,
+                    "generation_status": "OK",
+                    "generation_warning": generation_warning,
+                    "error_code": "",
+                },
+            )
+            store.complete_drive_row_ingestion(
+                idempotency_key=lead_row.idempotency_key,
+                record_id=record_id,
+                status="COMPLETED",
+            )
+            export_rows.append(export_row)
+            drive_export_items.append(
+                {
+                    "idempotency_key": lead_row.idempotency_key,
+                    "company_name": company.company_name,
+                    "contact_name": primary_contact.full_name if primary_contact else "",
+                    "generation_status": "OK",
+                    "sequence_result": sequence,
+                }
+            )
+            rows_generated_ok += 1
+            processed_companies += 1
+        except Exception as exc:
+            rows_failed += 1
+            warnings_total += 1
+            error_row = _error_row(
+                campaign_id=campaign_id,
+                parent_slug=row_parent_slug,
+                raw_row=lead_row.raw_row,
+                error_code="DRIVE_ROW_PROCESSING_FAILED",
+                warning_message=str(exc),
+                output_schema=output_schema,
+            )
+            error_row["idempotency_key"] = lead_row.idempotency_key
+            export_rows.append(error_row)
+            store.complete_drive_row_ingestion(
+                idempotency_key=lead_row.idempotency_key,
+                record_id=None,
+                status="FAILED",
+                error_message=str(exc)[:500],
+            )
+
+    export_result = export_sequence_to_drive(
+        workspace_folder_id,
+        drive_export_items,
+        clients.docs,
+        clients.drive,
+        clients.sheets,
+    )
+    print(
+        f"[drive-export] docs_created={export_result.docs_created} "
+        f"status_rows_written={export_result.status_rows_written}"
+    )
+
+    out_base = Path(out_dir)
+    out_base.mkdir(parents=True, exist_ok=True)
+    export_path = out_base / f"campaign-{campaign_id}.csv"
+    columns = _merge_columns(
+        list(lead_rows[0].raw_row.keys()) + ["idempotency_key", "sequence_steps", "attack_angle"],
+        approval_columns(output_schema),
+    )
+    write_csv(export_path, export_rows, columns)
+
+    summary = CampaignSummary(
+        campaign_id=campaign_id,
+        parent_slug=parent_slug,
+        leads_file=leads_ref,
+        sheet_id=sheet_id,
+        status="COMPLETED",
+        companies_total=processed_companies,
+        generated_total=rows_generated_ok,
+        warnings_total=warnings_total,
+        recipient_mode="row",
+        variant_mode=variant_mode,
+        output_schema=output_schema,
+        llm_policy=llm_policy,
+        io_mode="drive",
+        workspace_folder_id=workspace_folder_id,
+        rows_total=rows_total,
+        rows_valid=rows_total,
+        rows_skipped=0,
+        rows_generated_ok=rows_generated_ok,
+        rows_failed=rows_failed,
+        estimated_cost_eur=round(rows_total * 0.05, 2),
+        actual_cost_eur=round((rows_generated_ok + rows_failed) * 0.05, 2),
+    )
+    store.finalize_campaign(campaign_id, summary)
+    store.purge_expired_campaign_data(config.retention_days)
+    return summary, export_path, export_rows
+
+
+def _resolve_parent_slug_for_drive_row(
+    *,
+    store: PostgresStore,
+    row: DriveLeadRow,
+    fallback: str,
+) -> str:
+    explicit = (row.canonical_row.get("parent_slug") or "").strip()
+    if explicit:
+        return explicit
+    active = store.get_active_parent_slug()
+    if active:
+        return active
+    if fallback:
+        return fallback
+    profiles = store.list_parent_profiles()
+    if len(profiles) == 1:
+        return profiles[0].slug
+    return ""
 
 
 def campaign_status(store: PostgresStore, campaign_id: str) -> dict[str, object] | None:
@@ -332,6 +687,35 @@ def export_campaign(store: PostgresStore, campaign_id: str, output_path: str, ou
         payload = record.get("payload_json") or {}
         variants = payload.get("variants") if isinstance(payload, dict) else []
         by_name = {str(item.get("variant")).upper(): item for item in variants if isinstance(item, dict)}
+        sequence_payload = payload.get("sequence_result") if isinstance(payload, dict) else None
+        if not by_name and isinstance(sequence_payload, dict):
+            steps = sequence_payload.get("steps")
+            if isinstance(steps, list):
+                for step in steps:
+                    if not isinstance(step, dict):
+                        continue
+                    step_id = str(step.get("step_id") or "").upper()
+                    if step_id == "E1":
+                        by_name["A"] = {
+                            "variant": "A",
+                            "subject": str(step.get("subject") or ""),
+                            "body": str(step.get("body") or ""),
+                            "risk_flags": step.get("risk_flags") or [],
+                        }
+                    elif step_id == "E2":
+                        by_name["B"] = {
+                            "variant": "B",
+                            "subject": str(step.get("subject") or ""),
+                            "body": str(step.get("body") or ""),
+                            "risk_flags": step.get("risk_flags") or [],
+                        }
+                    elif step_id in {"E3", "BREAKUP"} and "C" not in by_name:
+                        by_name["C"] = {
+                            "variant": "C",
+                            "subject": str(step.get("subject") or ""),
+                            "body": str(step.get("body") or ""),
+                            "risk_flags": step.get("risk_flags") or [],
+                        }
 
         raw_row = payload.get("raw_row") if isinstance(payload, dict) else None
         row: dict[str, object] = dict(raw_row) if isinstance(raw_row, dict) else {}

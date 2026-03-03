@@ -39,6 +39,9 @@ export EMAILGENIUS_OPENAI_FALLBACK_BASE_URL="https://api.deepseek.com"
 export EMAILGENIUS_OPENAI_FALLBACK_CHAT_MODEL="deepseek-chat"
 export GOOGLE_SERVICE_ACCOUNT_JSON="/absolute/path/service-account.json"
 export EMAILGENIUS_RETENTION_DAYS="90"
+export EMAILGENIUS_WORKSPACE_FOLDER_ID="<GOOGLE_DRIVE_FOLDER_ID>"
+export EMAILGENIUS_DRIVE_POLL_INTERVAL_SECONDS="60"
+export EMAILGENIUS_IO_MODE="local"
 ```
 
 `OPENAI_BASE_URL`/`EMAILGENIUS_OPENAI_BASE_URL` permette di usare endpoint OpenAI-compatible
@@ -119,6 +122,36 @@ emailgenius campaign run \
   --cost-cap-eur 50
 ```
 
+Drive-native (Data Room):
+
+```bash
+emailgenius campaign run \
+  --slug azienda-a \
+  --io-mode drive \
+  --workspace-folder-id "<GOOGLE_DRIVE_FOLDER_ID>" \
+  --out-dir reports/campaigns \
+  --llm-policy strict \
+  --gsheets-auth service_account
+```
+
+Daemon continuo:
+
+```bash
+emailgenius workspace daemon \
+  --slug azienda-a \
+  --workspace-folder-id "<GOOGLE_DRIVE_FOLDER_ID>" \
+  --poll-interval-seconds 60 \
+  --gsheets-auth service_account
+```
+
+Sync singolo:
+
+```bash
+emailgenius workspace sync-once \
+  --slug azienda-a \
+  --workspace-folder-id "<GOOGLE_DRIVE_FOLDER_ID>"
+```
+
 ```bash
 emailgenius campaign status --campaign-id <campaign_id>
 emailgenius campaign export \
@@ -163,3 +196,6 @@ PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py' -v
 - Nessun invio automatico email in questa release.
 - Default `--llm-policy strict`: senza almeno una key (`OPENAI_API_KEY` o `EMAILGENIUS_OPENAI_FALLBACK_API_KEY`) la campagna si ferma.
 - Usa `--llm-policy fallback` per degradare a copy deterministico locale.
+- Drive-native Data Room: crea nella cartella workspace le sottocartelle `Profiles`, `Knowledge`, `Knowledge/Processed`, `Input Leads`, `Output Sequences`.
+- Condividi la cartella workspace in Editor con l'email del service account (`...iam.gserviceaccount.com`).
+- Verifica che nel progetto GCP siano abilitate Google Drive API, Google Docs API e Google Sheets API.

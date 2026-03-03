@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import getpass
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import re
 from typing import Iterable
@@ -11,11 +10,8 @@ from urllib.parse import parse_qs, urlparse
 
 import gspread
 from google.auth.transport.requests import AuthorizedSession
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 
-from .config import app_home
+from .google_auth import oauth_local_port, oauth_token_path, resolve_google_credentials
 
 
 APPROVAL_COLUMNS_AB = [
@@ -204,50 +200,40 @@ def publish_rows_to_worksheet(
     return len(values)
 
 
+def publish_master_status_rows(
+    *,
+    spreadsheet: gspread.Spreadsheet,
+    rows: list[dict[str, object]],
+    worksheet_name: str = "Status",
+) -> int:
+    columns = [
+        "idempotency_key",
+        "company_name",
+        "contact_name",
+        "status",
+        "doc_url",
+        "attack_angle",
+        "recommended_next_step",
+    ]
+    return publish_rows_to_worksheet(
+        spreadsheet=spreadsheet,
+        worksheet_name=worksheet_name,
+        columns=columns,
+        rows=rows,
+    )
+
+
 def _resolve_gspread_client(*, service_account_json: str | None, interactive: bool) -> gspread.Client:
-    if service_account_json:
-        return gspread.service_account(filename=service_account_json)
-
-    token_path = _oauth_token_path()
-    creds = _load_oauth_credentials(token_path)
-    if creds is None:
-        client_id = _oauth_client_id()
-        client_secret = _oauth_client_secret()
-        if not (client_id and client_secret):
-            if not interactive:
-                raise ValueError(
-                    "Google Sheets auth not configured. Set GOOGLE_SERVICE_ACCOUNT_JSON for service-account auth, "
-                    "or set EMAILGENIUS_GOOGLE_OAUTH_CLIENT_ID/EMAILGENIUS_GOOGLE_OAUTH_CLIENT_SECRET for OAuth."
-                )
-            client_id = input("Google OAuth client id: ").strip()
-            client_secret = getpass.getpass("Google OAuth client secret: ").strip()
-            if not (client_id and client_secret):
-                raise ValueError("Missing Google OAuth client id/secret")
-
-        client_config = {
-            "installed": {
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-            }
-        }
-        flow = InstalledAppFlow.from_client_config(client_config, scopes=SHEETS_SCOPES)
-        creds = flow.run_local_server(port=_oauth_local_port(), open_browser=True)
-        _save_oauth_credentials(creds, token_path)
-
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        _save_oauth_credentials(creds, token_path)
-
+    creds = resolve_google_credentials(
+        service_account_json=service_account_json,
+        interactive=interactive,
+        scopes=SHEETS_SCOPES,
+    )
     return gspread.authorize(creds)
 
 
 def _oauth_token_path() -> Path:
-    override = (os.getenv("EMAILGENIUS_GOOGLE_OAUTH_TOKEN_PATH") or "").strip()
-    if override:
-        return Path(override).expanduser()
-    return app_home() / "google-oauth-token.json"
+    return oauth_token_path()
 
 
 def _oauth_client_id() -> str | None:
@@ -265,30 +251,7 @@ def _oauth_client_secret() -> str | None:
 
 
 def _oauth_local_port() -> int:
-    raw = (os.getenv("EMAILGENIUS_GOOGLE_OAUTH_LOCAL_PORT") or "").strip()
-    if not raw:
-        return 53877
-    try:
-        port = int(raw)
-    except ValueError:
-        return 53877
-    if port <= 0 or port > 65535:
-        return 53877
-    return port
-
-
-def _load_oauth_credentials(path: Path) -> Credentials | None:
-    if not path.exists():
-        return None
-    try:
-        return Credentials.from_authorized_user_file(str(path), scopes=SHEETS_SCOPES)
-    except Exception:
-        return None
-
-
-def _save_oauth_credentials(creds: Credentials, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(creds.to_json(), encoding="utf-8")
+    return oauth_local_port()
 
 
 def _open_or_create_spreadsheet(

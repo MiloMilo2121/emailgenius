@@ -32,6 +32,9 @@ class AppConfig:
     openai_embedding_model: str
     google_service_account_json: str | None
     retention_days: int
+    workspace_folder_id: str | None = None
+    drive_poll_interval_seconds: int = 60
+    io_mode: str = "local"
     openai_fallback_api_key: str | None = None
     openai_fallback_base_url: str | None = None
     openai_fallback_chat_model: str | None = None
@@ -39,6 +42,14 @@ class AppConfig:
 
     @classmethod
     def from_env(cls) -> "AppConfig":
+        poll_seconds_raw = (os.getenv("EMAILGENIUS_DRIVE_POLL_INTERVAL_SECONDS") or "60").strip()
+        try:
+            poll_seconds = max(5, int(poll_seconds_raw))
+        except ValueError:
+            poll_seconds = 60
+        io_mode = (os.getenv("EMAILGENIUS_IO_MODE") or "local").strip().lower() or "local"
+        if io_mode not in {"local", "drive"}:
+            io_mode = "local"
         return cls(
             database_url=_default_db_url(),
             openai_api_key=_env_or_none("OPENAI_API_KEY", "EMAILGENIUS_OPENAI_API_KEY"),
@@ -53,6 +64,9 @@ class AppConfig:
             openai_fallback_chat_model=_env_or_none("EMAILGENIUS_OPENAI_FALLBACK_CHAT_MODEL"),
             google_service_account_json=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"),
             retention_days=int(os.getenv("EMAILGENIUS_RETENTION_DAYS", "90")),
+            workspace_folder_id=_env_or_none("EMAILGENIUS_WORKSPACE_FOLDER_ID"),
+            drive_poll_interval_seconds=poll_seconds,
+            io_mode=io_mode,
         )
 
 

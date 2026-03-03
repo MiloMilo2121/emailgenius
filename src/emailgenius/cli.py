@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -70,7 +71,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     campaign_run = campaign_sub.add_parser("run", help="Run campaign from leads CSV")
     campaign_run.add_argument("--slug", required=True, help="Parent slug")
-    campaign_run.add_argument("--leads", required=True, help="Leads CSV path")
+    campaign_run.add_argument("--leads", help="Leads CSV path (required in --io-mode local)")
+    campaign_run.add_argument(
+        "--io-mode",
+        default="local",
+        choices=["local", "drive"],
+        help="I/O mode: local file system or Drive-native workspace",
+    )
+    campaign_run.add_argument(
+        "--workspace-folder-id",
+        help="Google Drive workspace folder id (required in --io-mode drive if not set in env)",
+    )
     campaign_run.add_argument("--sheet-id", help="Google Sheet id for approval queue")
     campaign_run.add_argument(
         "--sheet-title",
@@ -175,6 +186,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="Approval schema (Drafts tab columns)",
     )
 
+    workspace_parser = subparsers.add_parser("workspace", help="Drive-native workspace orchestrator")
+    workspace_sub = workspace_parser.add_subparsers(dest="workspace_command", required=True)
+
+    workspace_sync = workspace_sub.add_parser("sync-once", help="Run one Drive-native sync/process cycle")
+    workspace_sync.add_argument("--slug", help="Fallback parent slug when row parent_slug is missing")
+    workspace_sync.add_argument("--workspace-folder-id", help="Google Drive workspace folder id")
+    workspace_sync.add_argument("--out-dir", default="reports/campaigns", help="Output directory")
+    workspace_sync.add_argument(
+        "--gsheets-auth",
+        default="auto",
+        choices=["auto", "service_account", "oauth"],
+        help="Google auth mode",
+    )
+    workspace_sync.add_argument("--headful", action="store_true", help="Run browser in headed mode")
+    workspace_sync.add_argument(
+        "--llm-policy",
+        default="strict",
+        choices=["strict", "fallback"],
+        help="LLM error policy",
+    )
+
+    workspace_daemon = workspace_sub.add_parser("daemon", help="Continuously process Drive workspace")
+    workspace_daemon.add_argument("--slug", help="Fallback parent slug when row parent_slug is missing")
+    workspace_daemon.add_argument("--workspace-folder-id", help="Google Drive workspace folder id")
+    workspace_daemon.add_argument("--out-dir", default="reports/campaigns", help="Output directory")
+    workspace_daemon.add_argument(
+        "--gsheets-auth",
+        default="auto",
+        choices=["auto", "service_account", "oauth"],
+        help="Google auth mode",
+    )
+    workspace_daemon.add_argument("--poll-interval-seconds", type=int, default=60, help="Loop polling interval")
+    workspace_daemon.add_argument("--headful", action="store_true", help="Run browser in headed mode")
+    workspace_daemon.add_argument(
+        "--llm-policy",
+        default="strict",
+        choices=["strict", "fallback"],
+        help="LLM error policy",
+    )
+
     return parser
 
 
@@ -204,6 +255,60 @@ def _llm(config: AppConfig) -> LLMGateway:
         fallback_api_base_url=config.openai_fallback_base_url,
         fallback_chat_model=config.openai_fallback_chat_model,
     )
+
+
+def _resolve_workspace_slug(store: PostgresStore, explicit_slug: str | None) -> str:
+    if explicit_slug:
+        return explicit_slug
+    active = store.get_active_parent_slug()
+    if active:
+        return active
+    profiles = store.list_parent_profiles()
+    if len(profiles) == 1:
+        return profiles[0].slug
+    raise ValueError("Parent slug not resolved. Pass --slug or set an active parent profile.")
+
+
+def _run_workspace_sync_once(
+    *,
+    config: AppConfig,
+    store: PostgresStore,
+    llm: LLMGateway,
+    slug: str | None,
+    workspace_folder_id: str | None,
+    out_dir: str,
+    gsheets_auth: str,
+    headless: bool,
+    llm_policy: str,
+) -> int:
+    resolved_slug = _resolve_workspace_slug(store, slug)
+    summary, export_path, _ = run_campaign(
+        config=config,
+        store=store,
+        llm=llm,
+        parent_slug=resolved_slug,
+        leads_csv_path=None,
+        out_dir=out_dir,
+        sheet_id=None,
+        gsheets_auth=gsheets_auth,
+        stages="all",
+        headless=headless,
+        recipient_mode="row",
+        variant_mode="ab",
+        output_schema="ab",
+        llm_policy=llm_policy,
+        enrichment_mode="auto",
+        max_concurrency=1,
+        max_retries=3,
+        backoff_base_seconds=1.0,
+        cost_cap_eur=999999.0,
+        force_cost_override=True,
+        io_mode="drive",
+        workspace_folder_id=workspace_folder_id or config.workspace_folder_id,
+    )
+    print(f"[workspace] campaign={summary.campaign_id} rows_ok={summary.rows_generated_ok} rows_failed={summary.rows_failed}")
+    print(f"[workspace] export={export_path}")
+    return 0
 
 
 def main() -> int:
@@ -334,6 +439,54 @@ def main() -> int:
                 print(f"{item['id']} | {item['kind']} | {item['source_path']} | {item['created_at']}")
             return 0
 
+    if args.command == "workspace":
+        try:
+            store = _store(config)
+        except RuntimeError as exc:
+            print(str(exc))
+            return 1
+        llm = _llm(config)
+
+        if args.workspace_command == "sync-once":
+            try:
+                return _run_workspace_sync_once(
+                    config=config,
+                    store=store,
+                    llm=llm,
+                    slug=args.slug,
+                    workspace_folder_id=args.workspace_folder_id,
+                    out_dir=args.out_dir,
+                    gsheets_auth=args.gsheets_auth,
+                    headless=not args.headful,
+                    llm_policy=args.llm_policy,
+                )
+            except Exception as exc:
+                print(f"[workspace] sync failed: {exc}")
+                return 1
+
+        if args.workspace_command == "daemon":
+            interval = max(5, int(args.poll_interval_seconds))
+            print(f"[workspace] daemon started | interval={interval}s")
+            while True:
+                started_at = time.time()
+                try:
+                    _run_workspace_sync_once(
+                        config=config,
+                        store=store,
+                        llm=llm,
+                        slug=args.slug,
+                        workspace_folder_id=args.workspace_folder_id,
+                        out_dir=args.out_dir,
+                        gsheets_auth=args.gsheets_auth,
+                        headless=not args.headful,
+                        llm_policy=args.llm_policy,
+                    )
+                except Exception as exc:
+                    print(f"[workspace] cycle failed: {exc}")
+                elapsed = time.time() - started_at
+                sleep_seconds = max(1, interval - int(elapsed))
+                time.sleep(sleep_seconds)
+
     if args.command == "campaign":
         if args.campaign_command == "run":
             try:
@@ -342,6 +495,9 @@ def main() -> int:
                 print(str(exc))
                 return 1
             llm = _llm(config)
+            if args.io_mode == "local" and not args.leads:
+                print("--leads is required when --io-mode local")
+                return 1
             summary, export_path, _ = run_campaign(
                 config=config,
                 store=store,
@@ -366,6 +522,8 @@ def main() -> int:
                 backoff_base_seconds=args.backoff_base_seconds,
                 cost_cap_eur=args.cost_cap_eur,
                 force_cost_override=args.force_cost_override,
+                io_mode=args.io_mode,
+                workspace_folder_id=args.workspace_folder_id or config.workspace_folder_id,
             )
             print(f"Campaign completed: {summary.campaign_id}")
             print(f"Companies: {summary.companies_total} | generated: {summary.generated_total} | warnings: {summary.warnings_total}")

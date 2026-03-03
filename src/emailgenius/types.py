@@ -138,6 +138,25 @@ class ApprovalRecord:
 
 
 @dataclass(slots=True)
+class SequenceStep:
+    step_id: str
+    subject: str
+    body: str
+    goal: str
+    risk_flags: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+
+
+@dataclass(slots=True)
+class SequenceResult:
+    attack_angle: str
+    trigger_facts: list[str] = field(default_factory=list)
+    steps: list[SequenceStep] = field(default_factory=list)
+    recommended_next_step: str | None = None
+    global_risk_flags: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class CampaignCompanyResult:
     campaign_id: str
     parent_slug: str
@@ -147,6 +166,7 @@ class CampaignCompanyResult:
     variants: list[DraftEmailVariant]
     recommended_variant: str
     approval: ApprovalRecord
+    sequence_result: SequenceResult | None = None
     risk_flags: list[str] = field(default_factory=list)
 
 
@@ -164,6 +184,8 @@ class CampaignSummary:
     variant_mode: str = "ab"
     output_schema: str = "ab"
     llm_policy: str = "strict"
+    io_mode: str = "local"
+    workspace_folder_id: str | None = None
     rows_total: int = 0
     rows_valid: int = 0
     rows_skipped: int = 0
