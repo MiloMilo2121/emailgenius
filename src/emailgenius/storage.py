@@ -466,6 +466,40 @@ class PostgresStore:
                 out["summary_json"] = summary_json
                 return out
 
+    def list_campaign_summaries(
+        self,
+        *,
+        limit: int = 20,
+        parent_slug: str | None = None,
+    ) -> list[dict[str, object]]:
+        lim = max(1, int(limit))
+        query = (
+            """
+            SELECT id, parent_slug, leads_file, sheet_id, status,
+                   started_at, finished_at, summary_json
+            FROM campaigns
+            """
+        )
+        params: tuple[object, ...]
+        if parent_slug:
+            query += " WHERE parent_slug=%s"
+            params = (parent_slug, lim)
+        else:
+            params = (lim,)
+        query += " ORDER BY started_at DESC LIMIT %s"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                rows: list[dict[str, object]] = []
+                for row in cur.fetchall():
+                    summary_json = row.get("summary_json")
+                    if isinstance(summary_json, str):
+                        summary_json = json.loads(summary_json)
+                    item = dict(row)
+                    item["summary_json"] = summary_json if isinstance(summary_json, dict) else {}
+                    rows.append(item)
+                return rows
+
     def list_campaign_records(self, campaign_id: str) -> list[dict[str, object]]:
         with self._connect() as conn:
             with conn.cursor() as cur:

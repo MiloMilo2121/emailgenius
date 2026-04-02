@@ -3,9 +3,12 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from emailgenius.gdrive import DriveLeadRow
+from emailgenius.gdrive import ParentWorkspace
 from emailgenius.gdrive import _canonicalize_lead_row
 from emailgenius.gdrive import _resolve_parent_slug_for_knowledge_file
 from emailgenius.gdrive import _render_sequence_doc
+from emailgenius.gdrive import fetch_leads_sheet
 from emailgenius.gdrive import sync_knowledge_base
 from emailgenius.gdrive import sync_parent_profiles
 from emailgenius.types import SequenceResult, SequenceStep
@@ -67,6 +70,30 @@ compliance_notes: [pubblico]
         self.assertEqual(report.skipped, 1)
         self.assertEqual(len(store.profiles), 1)
         self.assertEqual(store.profiles[0].slug, "azienda-a")
+
+    def test_sync_parent_profiles_uses_parent_workspace_slug(self) -> None:
+        payload = b"""
+slug: altro-slug
+company_name: Azienda B
+tone: formale
+offer_catalog: [Servizio]
+icp: [PMI]
+proof_points: [Case]
+objections: [Budget]
+cta_policy: call
+no_go_claims: [garantito]
+compliance_notes: [pubblico]
+"""
+        store = _FakeStore()
+        workspace = ParentWorkspace(slug="azienda-b", folder_id="parent-1", profile_folder_id="profile-folder")
+        with patch("emailgenius.gdrive._discover_parent_workspaces", return_value=[workspace]), patch(
+            "emailgenius.gdrive._list_files_in_folder",
+            return_value=[{"id": "1", "name": "profile.yaml"}],
+        ), patch("emailgenius.gdrive._download_drive_bytes", return_value=payload):
+            report = sync_parent_profiles("root", store, drive_client=object())
+
+        self.assertEqual(report.synced, 1)
+        self.assertEqual(store.profiles[0].slug, "azienda-b")
 
     def test_canonicalize_lead_row_maps_aliases(self) -> None:
         row = {
@@ -131,11 +158,13 @@ compliance_notes: [pubblico]
             "name": "brochure-generica.pdf",
             "modifiedTime": "2026-03-03T10:00:00Z",
         }
-        with patch("emailgenius.gdrive._ensure_subfolder", side_effect=["knowledge-folder", "processed-folder"]), patch(
-            "emailgenius.gdrive._list_files_in_folder", return_value=[drive_file]
-        ), patch("emailgenius.gdrive._download_drive_bytes") as download_mock, patch(
-            "emailgenius.gdrive.ingest_knowledge_file"
-        ) as ingest_mock, patch("emailgenius.gdrive._move_file_to_folder") as move_mock:
+        with patch("emailgenius.gdrive._discover_parent_workspaces", return_value=[]), patch(
+            "emailgenius.gdrive._ensure_subfolder", side_effect=["knowledge-folder", "processed-folder"]
+        ), patch("emailgenius.gdrive._list_files_in_folder", return_value=[drive_file]), patch(
+            "emailgenius.gdrive._download_drive_bytes"
+        ) as download_mock, patch("emailgenius.gdrive.ingest_knowledge_file") as ingest_mock, patch(
+            "emailgenius.gdrive._move_file_to_folder"
+        ) as move_mock:
             report = sync_knowledge_base("root", store, llm=object(), drive_client=object())
 
         self.assertEqual(report.failed, 1)
@@ -144,6 +173,42 @@ compliance_notes: [pubblico]
         download_mock.assert_not_called()
         ingest_mock.assert_not_called()
         move_mock.assert_not_called()
+
+    def test_fetch_leads_sheet_injects_parent_slug_from_parent_workspace(self) -> None:
+        class _Worksheet:
+            title = "Sheet1"
+
+            def get_all_values(self):
+                return [
+                    ["Email", "First Name", "Last Name", "companyName"],
+                    ["anna@example.com", "Anna", "Verdi", "Beta SRL"],
+                ]
+
+        class _Spreadsheet:
+            def worksheets(self):
+                return [_Worksheet()]
+
+        class _SheetsClient:
+            def open_by_key(self, key: str):
+                return _Spreadsheet()
+
+        workspace = ParentWorkspace(slug="azienda-a", folder_id="parent-1", leads_folder_id="leads-folder")
+        with patch("emailgenius.gdrive._discover_parent_workspaces", return_value=[workspace]), patch(
+            "emailgenius.gdrive._list_files_in_folder",
+            return_value=[
+                {
+                    "id": "sheet-1",
+                    "name": "INPUT LEADS",
+                    "mimeType": "application/vnd.google-apps.spreadsheet",
+                    "modifiedTime": "2026-04-02T10:00:00Z",
+                }
+            ],
+        ):
+            rows = fetch_leads_sheet("root", _SheetsClient(), drive_client=object())
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].canonical_row["parent_slug"], "azienda-a")
+        self.assertIsInstance(rows[0], DriveLeadRow)
 
 
 if __name__ == "__main__":

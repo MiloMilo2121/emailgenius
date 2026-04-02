@@ -1,93 +1,294 @@
 {% extends "base.html" %}
 
-{% block title %}Dashboard - EmailGenius{% endblock %}
-{% block eyebrow %}Control room{% endblock %}
-{% block page_title %}Dashboard{% endblock %}
-{% block page_intro %}Quick access to parents, lead workspaces, active campaigns, and processing jobs.{% endblock %}
-{% block topbar_actions %}
-  <a class="button button-primary" href="{{ url_for('parent_new') }}">New parent</a>
-  <a class="button button-ghost" href="{{ url_for('campaign_new') }}">New campaign</a>
-{% endblock %}
-
 {% block content %}
-  <section class="hero-grid">
-    <article class="hero-card hero-card-accent">
-      <p class="kicker">Main workflow</p>
-      <h2>One parent folder drives the whole run.</h2>
-      <p>Keep profile, knowledge, leads, and output together so the system always knows which parent owns each asset.</p>
-      <div class="card-actions">
-        <a class="button button-primary" href="{{ url_for('parents') }}">Manage parents</a>
-        <a class="button button-secondary" href="{{ url_for('workspace_sync') }}">Sync workspace</a>
+  <section class="hero card">
+    <div>
+      <p class="eyebrow">Local app over the existing engine</p>
+      <h1>Genera email senza passare dal terminale.</h1>
+      <p class="lede">
+        La UI usa lo stesso motore della CLI: Postgres per stato e RAG, Google Drive per workspace, stessi controlli su costi e compliance.
+      </p>
+    </div>
+    <div class="hero-grid">
+      <div class="metric">
+        <span>Workspace</span>
+        <strong>{{ config_summary.workspace_folder_id or "non configurato" }}</strong>
       </div>
+      <div class="metric">
+        <span>LLM</span>
+        <strong>{{ "configurato" if config_summary.llm_configured else "mancante" }}</strong>
+      </div>
+      <div class="metric">
+        <span>Google</span>
+        <strong>{{ "configurato" if config_summary.google_configured else "mancante" }}</strong>
+      </div>
+    </div>
+  </section>
+
+  <section class="grid-two">
+    <article class="card">
+      <div class="section-head">
+        <p class="eyebrow">Modello Drive consigliato</p>
+        <h2>1 cartella per parent</h2>
+      </div>
+      <pre class="code-block">PARENTS/
+  azienda-a/
+    PROFILE/profile.yaml
+    KNOWLEDGE/
+    LEADS/
+    OUTPUT/</pre>
+      <p class="muted">Se usi questa struttura, la cartella stessa identifica il parent. Niente prefissi file, niente parent_slug da ricordare a mano.</p>
     </article>
 
-    <article class="stat-card">
-      <p class="kicker">Parents</p>
-      <strong>{{ stats.parents_total if stats is defined and stats.parents_total is not none else "—" }}</strong>
-      <span>registered profiles</span>
-    </article>
-    <article class="stat-card">
-      <p class="kicker">Knowledge</p>
-      <strong>{{ stats.knowledge_docs_total if stats is defined and stats.knowledge_docs_total is not none else "—" }}</strong>
-      <span>indexed documents</span>
-    </article>
-    <article class="stat-card">
-      <p class="kicker">Campaigns</p>
-      <strong>{{ stats.campaigns_total if stats is defined and stats.campaigns_total is not none else "—" }}</strong>
-      <span>tracked runs</span>
-    </article>
-    <article class="stat-card">
-      <p class="kicker">Jobs</p>
-      <strong>{{ stats.jobs_total if stats is defined and stats.jobs_total is not none else "—" }}</strong>
-      <span>sync and generation jobs</span>
+    <article class="card">
+      <div class="section-head">
+        <p class="eyebrow">Parent registrati</p>
+        <h2>{{ parents|length }} attivi nel database</h2>
+      </div>
+      <div class="parent-list">
+        {% for parent in parents %}
+          <a class="parent-pill {% if parent.slug == active_parent_slug %}is-active{% endif %}" href="/parents/{{ parent.slug }}">
+            <span>{{ parent.company_name }}</span>
+            <small>{{ parent.slug }}</small>
+          </a>
+        {% else %}
+          <p class="muted">Nessun parent ancora registrato.</p>
+        {% endfor %}
+      </div>
     </article>
   </section>
 
-  <section class="layout-grid">
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <p class="kicker">Parents</p>
-          <h3>Active profiles</h3>
-        </div>
-        <a class="text-link" href="{{ url_for('parents') }}">View all</a>
+  <section class="grid-two">
+    <article class="card form-card">
+      <div class="section-head">
+        <p class="eyebrow">Nuovo parent</p>
+        <h2>Registra o aggiorna profilo</h2>
       </div>
-      <div class="stack-list">
-        {% for parent in parents or [] %}
-          <a class="list-row" href="{{ url_for('parent_detail', slug=parent.slug) }}">
-            <div>
-              <strong>{{ parent.company_name }}</strong>
-              <span>{{ parent.slug }}</span>
-            </div>
-            <span class="pill">{{ parent.status or "Ready" }}</span>
-          </a>
-        {% else %}
-          <div class="empty-state">No parent profiles yet.</div>
-        {% endfor %}
-      </div>
-    </section>
+      <form action="/parents" method="post" class="form-grid">
+        <label>
+          <span>Slug</span>
+          <input name="slug" placeholder="azienda-a">
+        </label>
+        <label>
+          <span>Company name</span>
+          <input name="company_name" required>
+        </label>
+        <label>
+          <span>Tono</span>
+          <input name="tone" value="{{ profile_defaults.tone }}" required>
+        </label>
+        <label>
+          <span>CTA policy</span>
+          <input name="cta_policy" value="{{ profile_defaults.cta_policy }}" required>
+        </label>
+        <label>
+          <span>Sender name</span>
+          <input name="sender_name" value="{{ profile_defaults.sender_name }}" required>
+        </label>
+        <label>
+          <span>Sender company</span>
+          <input name="sender_company" value="{{ profile_defaults.sender_company }}">
+        </label>
+        <label>
+          <span>Telefono</span>
+          <input name="sender_phone" value="{{ profile_defaults.sender_phone }}">
+        </label>
+        <label>
+          <span>Booking URL</span>
+          <input name="sender_booking_url" value="{{ profile_defaults.sender_booking_url }}">
+        </label>
+        <label class="full">
+          <span>Offer catalog</span>
+          <textarea name="offer_catalog" rows="3" required></textarea>
+        </label>
+        <label class="full">
+          <span>ICP</span>
+          <textarea name="icp" rows="3" required></textarea>
+        </label>
+        <label class="full">
+          <span>Proof points</span>
+          <textarea name="proof_points" rows="3"></textarea>
+        </label>
+        <label class="full">
+          <span>Objections</span>
+          <textarea name="objections" rows="3"></textarea>
+        </label>
+        <label class="full">
+          <span>No-go claims</span>
+          <textarea name="no_go_claims" rows="3"></textarea>
+        </label>
+        <label class="full">
+          <span>Compliance notes</span>
+          <textarea name="compliance_notes" rows="3"></textarea>
+        </label>
+        <label class="full">
+          <span>Seed template</span>
+          <textarea name="outreach_seed_template" rows="7">{{ profile_defaults.outreach_seed_template }}</textarea>
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" name="set_active" value="1">
+          <span>Imposta come parent attivo</span>
+        </label>
+        <button type="submit" class="button">Salva parent</button>
+      </form>
+    </article>
 
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <p class="kicker">Campaigns</p>
-          <h3>Latest runs</h3>
-        </div>
-        <a class="text-link" href="{{ url_for('campaigns') }}">View all</a>
+    <article class="card stack-card">
+      <div class="section-head">
+        <p class="eyebrow">Azioni rapide</p>
+        <h2>Knowledge e campagne</h2>
       </div>
-      <div class="stack-list">
-        {% for campaign in campaigns or [] %}
-          <a class="list-row" href="{{ url_for('campaign_detail', campaign_id=campaign.campaign_id) }}">
-            <div>
-              <strong>{{ campaign.campaign_id }}</strong>
-              <span>{{ campaign.parent_slug }} · {{ campaign.status }}</span>
-            </div>
-            <span class="pill">{{ campaign.generated_total or 0 }} generated</span>
-          </a>
-        {% else %}
-          <div class="empty-state">No campaigns yet.</div>
-        {% endfor %}
+
+      <form action="/knowledge/upload" method="post" enctype="multipart/form-data" class="form-grid compact">
+        <label>
+          <span>Parent slug</span>
+          <input name="slug" value="{{ active_parent_slug or '' }}" required>
+        </label>
+        <label>
+          <span>Kind</span>
+          <input name="kind" value="marketing">
+        </label>
+        <label class="full">
+          <span>File knowledge</span>
+          <input type="file" name="files" multiple required>
+        </label>
+        <button type="submit" class="button">Carica knowledge</button>
+      </form>
+
+      <form action="/campaigns/local" method="post" enctype="multipart/form-data" class="form-grid compact">
+        <label>
+          <span>Parent slug</span>
+          <input name="slug" value="{{ active_parent_slug or '' }}" required>
+        </label>
+        <label>
+          <span>LLM policy</span>
+          <select name="llm_policy">
+            <option value="strict">strict</option>
+            <option value="fallback">fallback</option>
+          </select>
+        </label>
+        <label>
+          <span>Cost cap (EUR)</span>
+          <input type="number" step="0.01" name="cost_cap_eur" value="50">
+        </label>
+        <label class="full">
+          <span>CSV lead</span>
+          <input type="file" name="leads_file" accept=".csv" required>
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" name="force_cost_override" value="1">
+          <span>Forza run anche sopra il cost cap</span>
+        </label>
+        <button type="submit" class="button">Lancia campagna locale</button>
+      </form>
+
+      <form action="/campaigns/drive" method="post" class="form-grid compact">
+        <label>
+          <span>Fallback parent slug</span>
+          <input name="slug" value="{{ active_parent_slug or '' }}">
+        </label>
+        <label>
+          <span>Workspace folder id</span>
+          <input name="workspace_folder_id" value="{{ config_summary.workspace_folder_id }}">
+        </label>
+        <label>
+          <span>Google auth</span>
+          <select name="gsheets_auth">
+            <option value="auto">auto</option>
+            <option value="service_account">service_account</option>
+            <option value="oauth">oauth</option>
+          </select>
+        </label>
+        <label>
+          <span>LLM policy</span>
+          <select name="llm_policy">
+            <option value="strict">strict</option>
+            <option value="fallback">fallback</option>
+          </select>
+        </label>
+        <label>
+          <span>Cost cap (EUR)</span>
+          <input type="number" step="0.01" name="cost_cap_eur" value="50">
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" name="force_cost_override" value="1">
+          <span>Forza run anche sopra il cost cap</span>
+        </label>
+        <button type="submit" class="button button-ghost">Avvia sync Drive</button>
+      </form>
+    </article>
+  </section>
+
+  <section class="grid-two">
+    <article class="card">
+      <div class="section-head">
+        <p class="eyebrow">Job recenti</p>
+        <h2>Esecuzioni in corso</h2>
       </div>
-    </section>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Label</th>
+              <th>Status</th>
+              <th>Messaggio</th>
+              <th>Campaign</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for job in jobs %}
+              <tr data-job-id="{{ job.job_id }}">
+                <td>{{ job.label }}</td>
+                <td class="job-status">{{ job.status }}</td>
+                <td class="job-message">{{ job.error or job.message }}</td>
+                <td class="job-campaign">
+                  {% if job.campaign_id %}
+                    <a href="/campaigns/{{ job.campaign_id }}">{{ job.campaign_id[:8] }}</a>
+                  {% else %}
+                    -
+                  {% endif %}
+                </td>
+              </tr>
+            {% else %}
+              <tr><td colspan="4" class="muted">Nessun job lanciato da questa UI.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="section-head">
+        <p class="eyebrow">Campagne recenti</p>
+        <h2>Storico esecuzioni</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Parent</th>
+              <th>Status</th>
+              <th>Mode</th>
+              <th>Rows ok</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for campaign in campaigns %}
+              {% set summary = campaign.summary_json or {} %}
+              <tr>
+                <td><a href="/campaigns/{{ campaign.id }}">{{ campaign.id[:8] }}</a></td>
+                <td>{{ campaign.parent_slug }}</td>
+                <td>{{ campaign.status }}</td>
+                <td>{{ summary.get("io_mode", "-") }}</td>
+                <td>{{ summary.get("rows_generated_ok", 0) }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="5" class="muted">Nessuna campagna salvata.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
   </section>
 {% endblock %}

@@ -389,9 +389,9 @@ def _run_campaign_drive_mode(
         interactive=auth_interactive,
     )
 
-    profiles_report = sync_parent_profiles(workspace_folder_id, store, clients.drive)
-    knowledge_report = sync_knowledge_base(workspace_folder_id, store, llm, clients.drive)
-    lead_rows = fetch_leads_sheet(workspace_folder_id, clients.sheets, clients.drive)
+    profiles_report = sync_parent_profiles(workspace_folder_id, store, clients.drive, parent_slug=parent_slug)
+    knowledge_report = sync_knowledge_base(workspace_folder_id, store, llm, clients.drive, parent_slug=parent_slug)
+    lead_rows = fetch_leads_sheet(workspace_folder_id, clients.sheets, clients.drive, parent_slug=parent_slug)
     if not lead_rows:
         raise ValueError("No lead rows found in Drive folder Input Leads")
 
@@ -577,6 +577,7 @@ def _run_campaign_drive_mode(
             drive_export_items.append(
                 {
                     "idempotency_key": lead_row.idempotency_key,
+                    "parent_slug": row_parent_slug,
                     "company_name": company.company_name,
                     "contact_name": primary_contact.full_name if primary_contact else "",
                     "generation_status": "OK",
@@ -611,6 +612,7 @@ def _run_campaign_drive_mode(
         clients.docs,
         clients.drive,
         clients.sheets,
+        parent_slug=parent_slug,
     )
     print(
         f"[drive-export] docs_created={export_result.docs_created} "

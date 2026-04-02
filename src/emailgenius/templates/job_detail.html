@@ -1,42 +1,28 @@
 {% extends "base.html" %}
 
-{% block title %}Job {{ job.job_id if job is defined else "" }} - EmailGenius{% endblock %}
-{% block eyebrow %}Processing job{% endblock %}
-{% block page_title %}Job detail{% endblock %}
-{% block page_intro %}Track sync, ingestion, and campaign generation without opening the database directly.{% endblock %}
-
 {% block content %}
-  <section class="hero-grid">
-    <article class="hero-card">
-      <p class="kicker">Status</p>
-      <h2>{{ job.status if job is defined and job.status else "Unknown" }}</h2>
-      <p>{{ job.error_message if job is defined and job.error_message else "No error reported." }}</p>
-    </article>
-    <article class="stat-card">
-      <p class="kicker">Type</p>
-      <strong>{{ job.kind if job is defined and job.kind else "—" }}</strong>
-      <span>job category</span>
-    </article>
-    <article class="stat-card">
-      <p class="kicker">Parent</p>
-      <strong>{{ job.parent_slug if job is defined and job.parent_slug else "—" }}</strong>
-      <span>workload owner</span>
-    </article>
-  </section>
-
-  <section class="panel">
-    <div class="panel-header">
-      <div>
-        <p class="kicker">Timeline</p>
-        <h3>Execution details</h3>
-      </div>
+  <section class="card">
+    <div class="section-head">
+      <p class="eyebrow">Background job</p>
+      <h1>{{ job.label }}</h1>
     </div>
-    <dl class="detail-grid">
-      <div><dt>Job id</dt><dd>{{ job.job_id if job is defined and job.job_id else "—" }}</dd></div>
-      <div><dt>Started</dt><dd>{{ job.started_at if job is defined and job.started_at else "—" }}</dd></div>
-      <div><dt>Updated</dt><dd>{{ job.updated_at if job is defined and job.updated_at else "—" }}</dd></div>
-      <div><dt>Retries</dt><dd>{{ job.retry_count if job is defined and job.retry_count is not none else "0" }}</dd></div>
-      <div class="full-width"><dt>Payload</dt><dd><pre class="code-block">{{ job.payload_json if job is defined and job.payload_json else "{}" }}</pre></dd></div>
-    </dl>
+    <div class="info-grid">
+      <div><span class="label">Job ID</span><strong>{{ job.job_id }}</strong></div>
+      <div><span class="label">Status</span><strong>{{ job.status }}</strong></div>
+      <div><span class="label">Parent</span><strong>{{ job.parent_slug }}</strong></div>
+      <div><span class="label">Aggiornato</span><strong>{{ job.updated_at }}</strong></div>
+    </div>
+    {% if job.message %}
+      <p>{{ job.message }}</p>
+    {% endif %}
+    {% if job.error_message %}
+      <pre class="code-block">{{ job.error_message }}</pre>
+    {% endif %}
+    {% if job.campaign_id %}
+      <p><a class="button" href="/campaigns/{{ job.campaign_id }}">Apri campagna</a></p>
+    {% endif %}
+    {% if job.export_path %}
+      <p class="muted">Export locale: {{ job.export_path }}</p>
+    {% endif %}
   </section>
 {% endblock %}

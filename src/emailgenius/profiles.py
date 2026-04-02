@@ -32,6 +32,10 @@ DEFAULT_OUTREACH_SEED_TEMPLATE = (
 def load_parent_profile(profile_path: str | Path, *, slug_override: str | None = None) -> ParentProfile:
     path = Path(profile_path)
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return build_parent_profile(payload, slug_override=slug_override)
+
+
+def build_parent_profile(payload: dict[str, object], *, slug_override: str | None = None) -> ParentProfile:
     if not isinstance(payload, dict):
         raise ValueError("Parent profile must be a YAML object.")
 

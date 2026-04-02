@@ -1,76 +1,111 @@
 {% extends "base.html" %}
 
-{% block title %}{{ parent.company_name }} - EmailGenius{% endblock %}
-{% block eyebrow %}Parent profile{% endblock %}
-{% block page_title %}{{ parent.company_name }}{% endblock %}
-{% block page_intro %}{{ parent.slug }} · {{ parent.tone }}{% endblock %}
-{% block topbar_actions %}
-  <a class="button button-secondary" href="{{ url_for('parent_edit', slug=parent.slug) }}">Edit parent</a>
-  <a class="button button-primary" href="{{ url_for('campaign_new', slug=parent.slug) }}">Run campaign</a>
-{% endblock %}
-
 {% block content %}
-  <section class="hero-grid">
-    <article class="hero-card">
-      <p class="kicker">Profile</p>
-      <h2>{{ parent.sender_name or parent.company_name }}</h2>
-      <p>{{ parent.outreach_seed_template }}</p>
+  <section class="card">
+    <div class="section-head">
+      <p class="eyebrow">Parent detail</p>
+      <h1>{{ parent.company_name }}</h1>
+    </div>
+    <div class="info-grid">
+      <div><span class="label">Slug</span><strong>{{ parent.slug }}</strong></div>
+      <div><span class="label">Tono</span><strong>{{ parent.tone }}</strong></div>
+      <div><span class="label">CTA</span><strong>{{ parent.cta_policy }}</strong></div>
+      <div><span class="label">Sender</span><strong>{{ parent.sender_name }}</strong></div>
+    </div>
+    <form action="/parents/{{ parent.slug }}/activate" method="post">
+      <button type="submit" class="button">Imposta come attivo</button>
+    </form>
+  </section>
+
+  <section class="grid-two">
+    <article class="card">
+      <div class="section-head">
+        <p class="eyebrow">Playbook</p>
+        <h2>Profilo operativo</h2>
+      </div>
+      <div class="stack-list">
+        <div><span class="label">Offer catalog</span><p>{{ parent.offer_catalog | join(", ") }}</p></div>
+        <div><span class="label">ICP</span><p>{{ parent.icp | join(", ") }}</p></div>
+        <div><span class="label">Proof points</span><p>{{ parent.proof_points | join(", ") }}</p></div>
+        <div><span class="label">Objections</span><p>{{ parent.objections | join(", ") }}</p></div>
+        <div><span class="label">No-go claims</span><p>{{ parent.no_go_claims | join(", ") }}</p></div>
+        <div><span class="label">Compliance</span><p>{{ parent.compliance_notes | join(", ") }}</p></div>
+      </div>
     </article>
-    <article class="stat-card">
-      <p class="kicker">Knowledge docs</p>
-      <strong>{{ metrics.knowledge_docs if metrics is defined and metrics.knowledge_docs is not none else "—" }}</strong>
-      <span>ingested for this parent</span>
-    </article>
-    <article class="stat-card">
-      <p class="kicker">Campaigns</p>
-      <strong>{{ metrics.campaigns if metrics is defined and metrics.campaigns is not none else "—" }}</strong>
-      <span>linked to this parent</span>
+
+    <article class="card">
+      <div class="section-head">
+        <p class="eyebrow">Knowledge</p>
+        <h2>RAG per questo parent</h2>
+      </div>
+      <form action="/knowledge/upload" method="post" enctype="multipart/form-data" class="form-grid compact">
+        <input type="hidden" name="slug" value="{{ parent.slug }}">
+        <label>
+          <span>Kind</span>
+          <input name="kind" value="marketing">
+        </label>
+        <label class="full">
+          <span>File</span>
+          <input type="file" name="files" multiple required>
+        </label>
+        <button type="submit" class="button">Aggiungi knowledge</button>
+      </form>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Kind</th>
+              <th>Source</th>
+              <th>Creato</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for doc in knowledge_docs %}
+              <tr>
+                <td>{{ doc.kind }}</td>
+                <td>{{ doc.source_path }}</td>
+                <td>{{ doc.created_at }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="3" class="muted">Nessun documento indicizzato.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
     </article>
   </section>
 
-  <section class="layout-grid">
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <p class="kicker">Knowledge</p>
-          <h3>Indexed documents</h3>
-        </div>
-      </div>
-      <div class="stack-list">
-        {% for item in knowledge_docs or [] %}
-          <div class="list-row">
-            <div>
-              <strong>{{ item.kind }}</strong>
-              <span>{{ item.source_path }}</span>
-            </div>
-            <span class="pill">{{ item.created_at }}</span>
-          </div>
-        {% else %}
-          <div class="empty-state">No knowledge documents found for this parent.</div>
-        {% endfor %}
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <p class="kicker">Campaigns</p>
-          <h3>Recent runs</h3>
-        </div>
-      </div>
-      <div class="stack-list">
-        {% for campaign in campaigns or [] %}
-          <a class="list-row" href="{{ url_for('campaign_detail', campaign_id=campaign.campaign_id) }}">
-            <div>
-              <strong>{{ campaign.campaign_id }}</strong>
-              <span>{{ campaign.status }} · {{ campaign.created_at if campaign.created_at is defined else "" }}</span>
-            </div>
-            <span class="pill">{{ campaign.generated_total or 0 }} generated</span>
-          </a>
-        {% else %}
-          <div class="empty-state">No campaigns for this parent yet.</div>
-        {% endfor %}
-      </div>
-    </section>
+  <section class="card">
+    <div class="section-head">
+      <p class="eyebrow">Campagne</p>
+      <h2>Ultime esecuzioni per {{ parent.slug }}</h2>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Status</th>
+            <th>Mode</th>
+            <th>Rows ok</th>
+            <th>Costi</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for campaign in campaigns %}
+            {% set summary = campaign.summary_json or {} %}
+            <tr>
+              <td><a href="/campaigns/{{ campaign.id }}">{{ campaign.id[:8] }}</a></td>
+              <td>{{ campaign.status }}</td>
+              <td>{{ summary.get("io_mode", "-") }}</td>
+              <td>{{ summary.get("rows_generated_ok", 0) }}</td>
+              <td>{{ summary.get("actual_cost_eur", 0) }} EUR</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="5" class="muted">Nessuna campagna ancora.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   </section>
 {% endblock %}

@@ -226,6 +226,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="LLM error policy",
     )
 
+    app_parser = subparsers.add_parser("app", help="Run local web app")
+    app_sub = app_parser.add_subparsers(dest="app_command", required=True)
+    app_serve = app_sub.add_parser("serve", help="Serve EmailGenius web app locally")
+    app_serve.add_argument("--host", default="127.0.0.1", help="Bind host")
+    app_serve.add_argument("--port", type=int, default=8080, help="Bind port")
+    app_serve.add_argument("--reload", action="store_true", help="Enable auto-reload")
+
     return parser
 
 
@@ -486,6 +493,22 @@ def main() -> int:
                 elapsed = time.time() - started_at
                 sleep_seconds = max(1, interval - int(elapsed))
                 time.sleep(sleep_seconds)
+
+    if args.command == "app":
+        if args.app_command == "serve":
+            try:
+                import uvicorn
+            except Exception as exc:  # pragma: no cover - dependency/runtime dependent
+                print(f"Web app dependencies unavailable: {exc}")
+                return 1
+            uvicorn.run(
+                "emailgenius.webapp:create_app",
+                factory=True,
+                host=args.host,
+                port=max(1, int(args.port)),
+                reload=bool(args.reload),
+            )
+            return 0
 
     if args.command == "campaign":
         if args.campaign_command == "run":

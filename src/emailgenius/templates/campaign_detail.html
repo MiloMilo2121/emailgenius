@@ -1,82 +1,55 @@
 {% extends "base.html" %}
 
-{% block title %}Campaign {{ campaign.campaign_id if campaign is defined else "" }} - EmailGenius{% endblock %}
-{% block eyebrow %}Campaign{% endblock %}
-{% block page_title %}Campaign detail{% endblock %}
-{% block page_intro %}Review output, generation status, cost summary, and the exported sequence artifacts.{% endblock %}
-{% block topbar_actions %}
-  <a class="button button-secondary" href="{{ url_for('campaigns') }}">Back to campaigns</a>
-  <a class="button button-primary" href="{{ url_for('campaign_export', campaign_id=campaign.campaign_id) }}">Export</a>
-{% endblock %}
-
 {% block content %}
-  <section class="hero-grid">
-    <article class="hero-card hero-card-accent">
-      <p class="kicker">Overview</p>
-      <h2>{{ campaign.status if campaign is defined and campaign.status else "Campaign" }}</h2>
-      <p>{{ campaign.leads_file if campaign is defined and campaign.leads_file else "No source file available." }}</p>
-    </article>
-    <article class="stat-card">
-      <p class="kicker">Generated</p>
-      <strong>{{ campaign.generated_total if campaign is defined and campaign.generated_total is not none else "—" }}</strong>
-      <span>ready rows</span>
-    </article>
-    <article class="stat-card">
-      <p class="kicker">Warnings</p>
-      <strong>{{ campaign.warnings_total if campaign is defined and campaign.warnings_total is not none else "—" }}</strong>
-      <span>quality or sync warnings</span>
-    </article>
-    <article class="stat-card">
-      <p class="kicker">Cost</p>
-      <strong>{{ "%.2f"|format(campaign.estimated_cost_eur) if campaign is defined and campaign.estimated_cost_eur is not none else "—" }} EUR</strong>
-      <span>estimated spend</span>
-    </article>
+  {% set meta = summary.summary_json or {} %}
+  <section class="card">
+    <div class="section-head">
+      <p class="eyebrow">Campaign detail</p>
+      <h1>{{ summary.id }}</h1>
+    </div>
+    <div class="info-grid">
+      <div><span class="label">Parent</span><strong>{{ summary.parent_slug }}</strong></div>
+      <div><span class="label">Status</span><strong>{{ summary.status }}</strong></div>
+      <div><span class="label">I/O mode</span><strong>{{ meta.get("io_mode", "-") }}</strong></div>
+      <div><span class="label">Rows ok</span><strong>{{ meta.get("rows_generated_ok", 0) }}</strong></div>
+      <div><span class="label">Rows failed</span><strong>{{ meta.get("rows_failed", 0) }}</strong></div>
+      <div><span class="label">Actual cost</span><strong>{{ meta.get("actual_cost_eur", 0) }} EUR</strong></div>
+    </div>
+    {% if summary.leads_file %}
+      <p class="muted">Origine lead: {{ summary.leads_file }}</p>
+    {% endif %}
   </section>
 
-  <section class="layout-grid">
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <p class="kicker">Rows</p>
-          <h3>Output rows</h3>
-        </div>
-      </div>
-      <div class="stack-list">
-        {% for row in records or [] %}
-          <article class="list-row list-row-vertical">
-            <div class="row-topline">
-              <div>
-                <strong>{{ row.company_name }}</strong>
-                <span>{{ row.contact_name or "No contact" }} · {{ row.status }}</span>
-              </div>
-              <span class="pill">{{ row.parent_slug }}</span>
-            </div>
-            <div class="row-meta">
-              <span>Variant: {{ row.approved_variant or row.recommended_variant or "n/a" }}</span>
-              <span>Doc: {{ row.doc_url or "not exported" }}</span>
-            </div>
-          </article>
-        {% else %}
-          <div class="empty-state">No campaign records available.</div>
-        {% endfor %}
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <p class="kicker">Summary</p>
-          <h3>Execution snapshot</h3>
-        </div>
-      </div>
-      <dl class="detail-grid">
-        <div><dt>Campaign id</dt><dd>{{ campaign.campaign_id if campaign is defined else "—" }}</dd></div>
-        <div><dt>Parent</dt><dd>{{ campaign.parent_slug if campaign is defined else "—" }}</dd></div>
-        <div><dt>Rows total</dt><dd>{{ campaign.rows_total if campaign is defined else "—" }}</dd></div>
-        <div><dt>Rows failed</dt><dd>{{ campaign.rows_failed if campaign is defined else "—" }}</dd></div>
-        <div><dt>Actual cost</dt><dd>{{ "%.2f"|format(campaign.actual_cost_eur) if campaign is defined and campaign.actual_cost_eur is not none else "—" }} EUR</dd></div>
-        <div class="full-width"><dt>Summary JSON</dt><dd><pre class="code-block">{{ campaign.summary_json if campaign is defined and campaign.summary_json else "{}" }}</pre></dd></div>
-      </dl>
-    </section>
+  <section class="card">
+    <div class="section-head">
+      <p class="eyebrow">Generated records</p>
+      <h2>{{ records|length }} righe</h2>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Azienda</th>
+            <th>Contatto</th>
+            <th>Status</th>
+            <th>Subject finale</th>
+            <th>Body</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for record in records %}
+            <tr>
+              <td>{{ record.company_name }}</td>
+              <td>{{ record.contact_name or "-" }}</td>
+              <td>{{ record.status }}</td>
+              <td>{{ record.final_subject or "-" }}</td>
+              <td><div class="body-preview">{{ record.final_body or "-" }}</div></td>
+            </tr>
+          {% else %}
+            <tr><td colspan="5" class="muted">Nessun record salvato.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   </section>
 {% endblock %}

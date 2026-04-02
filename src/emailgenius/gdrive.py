@@ -32,6 +32,11 @@ from .utils import slugify
 
 _DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 _DRIVE_SHEET_MIME = "application/vnd.google-apps.spreadsheet"
+_PARENTS_ROOT_NAMES = ("PARENTS", "Parents")
+_PROFILE_FOLDER_NAMES = ("PROFILE", "Profile", "Profiles")
+_KNOWLEDGE_FOLDER_NAMES = ("KNOWLEDGE", "Knowledge")
+_LEADS_FOLDER_NAMES = ("LEADS", "Leads", "Input Leads")
+_OUTPUT_FOLDER_NAMES = ("OUTPUT", "Output", "Output Sequences")
 
 
 @dataclass(slots=True)
@@ -68,6 +73,16 @@ class ExportResult:
     doc_urls: list[str]
 
 
+@dataclass(slots=True)
+class ParentWorkspace:
+    slug: str
+    folder_id: str
+    profile_folder_id: str | None = None
+    knowledge_folder_id: str | None = None
+    leads_folder_id: str | None = None
+    output_folder_id: str | None = None
+
+
 def build_workspace_clients(*, service_account_json: str | None, interactive: bool) -> WorkspaceClients:
     if build is None:
         raise RuntimeError(
@@ -84,14 +99,51 @@ def build_workspace_clients(*, service_account_json: str | None, interactive: bo
     return WorkspaceClients(drive=drive, docs=docs, sheets=sheets)
 
 
-def sync_parent_profiles(folder_id: str, store: PostgresStore, drive_client: Any) -> SyncReport:
+def sync_parent_profiles(
+    folder_id: str,
+    store: PostgresStore,
+    drive_client: Any,
+    parent_slug: str | None = None,
+) -> SyncReport:
     report = SyncReport()
+    parent_workspaces = _discover_parent_workspaces(folder_id, drive_client, parent_slug=parent_slug)
+    if parent_workspaces:
+        for workspace in parent_workspaces:
+            if not workspace.profile_folder_id:
+                report.skipped += 1
+                continue
+            report = _sync_parent_profiles_from_folder(
+                report=report,
+                store=store,
+                drive_client=drive_client,
+                folder_id=workspace.profile_folder_id,
+                slug_override=workspace.slug,
+            )
+        return report
+
     profiles_folder_id = _ensure_subfolder(drive_client, parent_id=folder_id, name="Profiles", create=False)
     if not profiles_folder_id:
         return report
 
-    files = _list_files_in_folder(drive_client, profiles_folder_id)
-    report.scanned = len(files)
+    return _sync_parent_profiles_from_folder(
+        report=report,
+        store=store,
+        drive_client=drive_client,
+        folder_id=profiles_folder_id,
+        slug_override=None,
+    )
+
+
+def _sync_parent_profiles_from_folder(
+    *,
+    report: SyncReport,
+    store: PostgresStore,
+    drive_client: Any,
+    folder_id: str,
+    slug_override: str | None,
+) -> SyncReport:
+    files = _list_files_in_folder(drive_client, folder_id)
+    report.scanned += len(files)
     for item in files:
         name = str(item.get("name") or "")
         if not name.lower().endswith((".yaml", ".yml")):
@@ -102,7 +154,7 @@ def sync_parent_profiles(folder_id: str, store: PostgresStore, drive_client: Any
             with tempfile.NamedTemporaryFile(mode="wb", suffix=".yaml") as handle:
                 handle.write(content)
                 handle.flush()
-                profile = load_parent_profile(handle.name)
+                profile = load_parent_profile(handle.name, slug_override=slug_override)
             store.upsert_parent_profile(profile)
             report.synced += 1
         except Exception:
@@ -115,16 +167,60 @@ def sync_knowledge_base(
     store: PostgresStore,
     llm,
     drive_client: Any,
+    parent_slug: str | None = None,
 ) -> SyncReport:
     report = SyncReport()
+    parent_workspaces = _discover_parent_workspaces(folder_id, drive_client, parent_slug=parent_slug)
+    if parent_workspaces:
+        for workspace in parent_workspaces:
+            if not workspace.knowledge_folder_id:
+                report.skipped += 1
+                continue
+            processed_folder_id = _ensure_subfolder(
+                drive_client,
+                parent_id=workspace.knowledge_folder_id,
+                name="Processed",
+                create=True,
+            )
+            report = _sync_knowledge_folder(
+                report=report,
+                folder_id=workspace.knowledge_folder_id,
+                processed_folder_id=processed_folder_id,
+                store=store,
+                llm=llm,
+                drive_client=drive_client,
+                parent_slug=workspace.slug,
+            )
+        return report
+
     knowledge_folder_id = _ensure_subfolder(drive_client, parent_id=folder_id, name="Knowledge", create=False)
     if not knowledge_folder_id:
         return report
 
     processed_folder_id = _ensure_subfolder(drive_client, parent_id=knowledge_folder_id, name="Processed", create=True)
-    files = _list_files_in_folder(drive_client, knowledge_folder_id)
-    report.scanned = len(files)
+    return _sync_knowledge_folder(
+        report=report,
+        folder_id=knowledge_folder_id,
+        processed_folder_id=processed_folder_id,
+        store=store,
+        llm=llm,
+        drive_client=drive_client,
+        parent_slug=None,
+    )
 
+
+def _sync_knowledge_folder(
+    *,
+    report: SyncReport,
+    folder_id: str,
+    processed_folder_id: str | None,
+    store: PostgresStore,
+    llm,
+    drive_client: Any,
+    parent_slug: str | None,
+) -> SyncReport:
+    files = _list_files_in_folder(drive_client, folder_id)
+    report.scanned += len(files)
     known_parent_slugs = {str(item.slug).strip() for item in store.list_parent_profiles() if str(item.slug).strip()}
     active_parent_slug = store.get_active_parent_slug()
     for item in files:
@@ -140,12 +236,12 @@ def sync_knowledge_base(
             report.skipped += 1
             continue
 
-        parent_slug = _resolve_parent_slug_for_knowledge_file(
+        resolved_parent_slug = parent_slug or _resolve_parent_slug_for_knowledge_file(
             file_name=name,
             known_parent_slugs=known_parent_slugs,
             active_parent_slug=active_parent_slug,
         )
-        if not parent_slug:
+        if not resolved_parent_slug:
             store.upsert_drive_file_sync_state(
                 file_id=file_id,
                 modified_time=modified_time,
@@ -163,11 +259,12 @@ def sync_knowledge_base(
                 ingest_knowledge_file(
                     store=store,
                     llm=llm,
-                    parent_slug=parent_slug,
+                    parent_slug=resolved_parent_slug,
                     file_path=str(local_path),
                     kind="marketing",
                 )
-            _move_file_to_folder(drive_client, file_id=file_id, target_folder_id=processed_folder_id)
+            if processed_folder_id:
+                _move_file_to_folder(drive_client, file_id=file_id, target_folder_id=processed_folder_id)
             store.upsert_drive_file_sync_state(
                 file_id=file_id,
                 modified_time=modified_time,
@@ -187,13 +284,49 @@ def sync_knowledge_base(
     return report
 
 
-def fetch_leads_sheet(folder_id: str, sheets_client: gspread.Client, drive_client: Any) -> list[DriveLeadRow]:
+def fetch_leads_sheet(
+    folder_id: str,
+    sheets_client: gspread.Client,
+    drive_client: Any,
+    parent_slug: str | None = None,
+) -> list[DriveLeadRow]:
+    parent_workspaces = _discover_parent_workspaces(folder_id, drive_client, parent_slug=parent_slug)
+    if parent_workspaces:
+        out: list[DriveLeadRow] = []
+        for workspace in parent_workspaces:
+            if not workspace.leads_folder_id:
+                continue
+            out.extend(
+                _fetch_leads_from_folder(
+                    folder_id=workspace.leads_folder_id,
+                    sheets_client=sheets_client,
+                    drive_client=drive_client,
+                    forced_parent_slug=workspace.slug,
+                )
+            )
+        return out
+
     input_folder_id = _ensure_subfolder(drive_client, parent_id=folder_id, name="Input Leads", create=False)
     if not input_folder_id:
         return []
 
+    return _fetch_leads_from_folder(
+        folder_id=input_folder_id,
+        sheets_client=sheets_client,
+        drive_client=drive_client,
+        forced_parent_slug=None,
+    )
+
+
+def _fetch_leads_from_folder(
+    *,
+    folder_id: str,
+    sheets_client: gspread.Client,
+    drive_client: Any,
+    forced_parent_slug: str | None,
+) -> list[DriveLeadRow]:
     out: list[DriveLeadRow] = []
-    files = _list_files_in_folder(drive_client, input_folder_id)
+    files = _list_files_in_folder(drive_client, folder_id)
     for item in files:
         mime_type = str(item.get("mimeType") or "")
         if mime_type != _DRIVE_SHEET_MIME:
@@ -220,6 +353,8 @@ def fetch_leads_sheet(folder_id: str, sheets_client: gspread.Client, drive_clien
                 if not _row_has_any_data(raw_row):
                     continue
                 canonical_row = _canonicalize_lead_row(raw_row)
+                if forced_parent_slug:
+                    canonical_row["parent_slug"] = forced_parent_slug
                 identity = f"{sheet_id}:{worksheet.title}:{idx}:{modified_time}"
                 idempotency_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
                 out.append(
@@ -243,8 +378,11 @@ def export_sequence_to_drive(
     docs_client: Any,
     drive_client: Any,
     sheets_client: gspread.Client,
+    parent_slug: str | None = None,
 ) -> ExportResult:
-    output_folder_id = _ensure_subfolder(drive_client, parent_id=folder_id, name="Output Sequences", create=True)
+    parent_workspaces = _discover_parent_workspaces(folder_id, drive_client, parent_slug=parent_slug)
+    workspace_by_slug = {item.slug: item for item in parent_workspaces}
+    global_output_folder_id = _ensure_subfolder(drive_client, parent_id=folder_id, name="Output Sequences", create=True)
     status_sheet = _open_or_create_master_status_sheet(
         drive_client=drive_client,
         sheets_client=sheets_client,
@@ -264,6 +402,7 @@ def export_sequence_to_drive(
         contact_name = str(item.get("contact_name") or "Contatto")
         idempotency_key = str(item.get("idempotency_key") or "")
         status = str(item.get("generation_status") or "OK")
+        parent_slug = str(item.get("parent_slug") or "").strip()
 
         title = f"{company_name} - {contact_name} - {idempotency_key[:8]}".strip(" -")
         doc_id = _create_google_doc(docs_client=docs_client, title=title)
@@ -273,7 +412,19 @@ def export_sequence_to_drive(
             sequence=sequence,
         )
         _replace_doc_body(docs_client=docs_client, doc_id=doc_id, text=body_text)
-        _move_file_to_folder(drive_client, file_id=doc_id, target_folder_id=output_folder_id)
+        target_folder_id = global_output_folder_id
+        if parent_slug and parent_slug in workspace_by_slug:
+            workspace = workspace_by_slug[parent_slug]
+            if not workspace.output_folder_id:
+                workspace.output_folder_id = _ensure_subfolder_alias(
+                    drive_client,
+                    parent_id=workspace.folder_id,
+                    names=_OUTPUT_FOLDER_NAMES,
+                    create=True,
+                )
+            target_folder_id = workspace.output_folder_id or target_folder_id
+        if target_folder_id:
+            _move_file_to_folder(drive_client, file_id=doc_id, target_folder_id=target_folder_id)
 
         doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
         doc_urls.append(doc_url)
@@ -389,6 +540,22 @@ def _ensure_subfolder(drive_client: Any, *, parent_id: str, name: str, create: b
     return str(created.get("id") or "") if isinstance(created, dict) else None
 
 
+def _ensure_subfolder_alias(
+    drive_client: Any,
+    *,
+    parent_id: str,
+    names: tuple[str, ...],
+    create: bool,
+) -> str | None:
+    for name in names:
+        folder_id = _ensure_subfolder(drive_client, parent_id=parent_id, name=name, create=False)
+        if folder_id:
+            return folder_id
+    if not create or not names:
+        return None
+    return _ensure_subfolder(drive_client, parent_id=parent_id, name=names[0], create=True)
+
+
 def _move_file_to_folder(drive_client: Any, *, file_id: str, target_folder_id: str) -> None:
     meta = _execute_with_backoff(
         lambda: drive_client.files()
@@ -410,6 +577,69 @@ def _move_file_to_folder(drive_client: Any, *, file_id: str, target_folder_id: s
         )
         .execute()
     )
+
+
+def _discover_parent_workspaces(
+    folder_id: str,
+    drive_client: Any,
+    *,
+    parent_slug: str | None = None,
+) -> list[ParentWorkspace]:
+    parents_root_id = _ensure_subfolder_alias(
+        drive_client,
+        parent_id=folder_id,
+        names=_PARENTS_ROOT_NAMES,
+        create=False,
+    )
+    if not parents_root_id:
+        return []
+
+    requested_slug = slugify(parent_slug or "")
+    workspaces: list[ParentWorkspace] = []
+    for item in _list_files_in_folder(drive_client, parents_root_id):
+        if str(item.get("mimeType") or "") != _DRIVE_FOLDER_MIME:
+            continue
+        raw_name = str(item.get("name") or "").strip()
+        if not raw_name or raw_name.startswith(".") or raw_name.startswith("_"):
+            continue
+        slug = slugify(raw_name)
+        if requested_slug and slug != requested_slug:
+            continue
+        workspace_folder_id = str(item.get("id") or "")
+        if not workspace_folder_id:
+            continue
+        workspaces.append(
+            ParentWorkspace(
+                slug=slug,
+                folder_id=workspace_folder_id,
+                profile_folder_id=_ensure_subfolder_alias(
+                    drive_client,
+                    parent_id=workspace_folder_id,
+                    names=_PROFILE_FOLDER_NAMES,
+                    create=False,
+                ),
+                knowledge_folder_id=_ensure_subfolder_alias(
+                    drive_client,
+                    parent_id=workspace_folder_id,
+                    names=_KNOWLEDGE_FOLDER_NAMES,
+                    create=False,
+                ),
+                leads_folder_id=_ensure_subfolder_alias(
+                    drive_client,
+                    parent_id=workspace_folder_id,
+                    names=_LEADS_FOLDER_NAMES,
+                    create=False,
+                ),
+                output_folder_id=_ensure_subfolder_alias(
+                    drive_client,
+                    parent_id=workspace_folder_id,
+                    names=_OUTPUT_FOLDER_NAMES,
+                    create=False,
+                ),
+            )
+        )
+
+    return sorted(workspaces, key=lambda item: item.slug)
 
 
 def _resolve_parent_slug_for_knowledge_file(

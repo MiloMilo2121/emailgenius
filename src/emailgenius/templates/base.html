@@ -1,62 +1,31 @@
 <!doctype html>
 <html lang="it">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{% block title %}EmailGenius{% endblock %}</title>
-    <meta name="description" content="{% block meta_description %}EmailGenius local app{% endblock %}">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
-    {% block head %}{% endblock %}
-  </head>
-  <body>
-    <div class="page-shell">
-      <aside class="sidebar">
-        <div class="brand-lockup">
-          <div class="brand-mark">EG</div>
-          <div>
-            <div class="brand-name">EmailGenius</div>
-            <div class="brand-subtitle">Drive-native outreach studio</div>
-          </div>
-        </div>
-        <nav class="side-nav" aria-label="Primary">
-          <a class="nav-link {% if active_page == 'dashboard' %}is-active{% endif %}" href="{{ url_for('dashboard') }}">Dashboard</a>
-          <a class="nav-link {% if active_page == 'parents' %}is-active{% endif %}" href="{{ url_for('parents') }}">Parent profiles</a>
-          <a class="nav-link {% if active_page == 'campaigns' %}is-active{% endif %}" href="{{ url_for('campaigns') }}">Campaigns</a>
-          <a class="nav-link {% if active_page == 'jobs' %}is-active{% endif %}" href="{{ url_for('jobs') }}">Jobs</a>
-        </nav>
-        <div class="sidebar-card">
-          <div class="kicker">Workspace</div>
-          <p>One parent folder, one knowledge set, one lead sheet flow. Minimal friction.</p>
-        </div>
-      </aside>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }} | EmailGenius</title>
+  <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="topbar">
+      <a class="brand" href="/">EmailGenius</a>
+      <nav class="topnav">
+        <a href="/">Dashboard</a>
+      </nav>
+    </header>
 
-      <main class="main-content">
-        <header class="topbar">
-          <div>
-            <p class="eyebrow">{% block eyebrow %}EmailGenius{% endblock %}</p>
-            <h1>{% block page_title %}Dashboard{% endblock %}</h1>
-            <p class="page-intro">{% block page_intro %}Manage parents, leads, knowledge, and campaigns from one place.{% endblock %}</p>
-          </div>
-          <div class="topbar-actions">
-            {% block topbar_actions %}{% endblock %}
-          </div>
-        </header>
+    {% if ui.message %}
+      <div class="notice notice-ok">{{ ui.message }}</div>
+    {% endif %}
+    {% if ui.error %}
+      <div class="notice notice-error">{{ ui.error }}</div>
+    {% endif %}
 
-        {% with messages = flashes or [] %}
-          {% if messages %}
-            <section class="flash-stack" aria-live="polite">
-              {% for message in messages %}
-                <div class="flash">{{ message }}</div>
-              {% endfor %}
-            </section>
-          {% endif %}
-        {% endwith %}
-
-        {% block content %}{% endblock %}
-      </main>
-    </div>
-  </body>
+    <main class="layout">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  <script src="{{ request.url_for('static', path='app.js') }}"></script>
+</body>
 </html>

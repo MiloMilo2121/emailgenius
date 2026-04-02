@@ -1,6 +1,6 @@
 # EmailGenius
 
-Sistema CLI per campagne email B2B multi-azienda madre con:
+Sistema CLI + app locale per campagne email B2B multi-azienda madre con:
 - contesto persistente per parent company (`slug`),
 - ingest CSV lead con canonicalizzazione header + preflight validazione,
 - enrichment pubblico (sito, news, link LinkedIn pubblici),
@@ -9,6 +9,8 @@ Sistema CLI per campagne email B2B multi-azienda madre con:
 - quality gates (claim guard, anti-spam, rewrite-budget) con repair pass,
 - coda approvazione su Google Sheet + export CSV send-ready (outer join input+output),
 - retention automatica dati campagna (default 90 giorni).
+
+Non serve Supabase per questa fase: l'app usa gia `PostgreSQL` come source of truth e `Google Drive` come data room.
 
 ## Requisiti
 
@@ -85,6 +87,21 @@ outreach_seed_template: |
 
 ## Comandi principali
 
+### App locale
+
+Avvia la UI locale:
+
+```bash
+emailgenius app serve --host 127.0.0.1 --port 8080
+```
+
+La UI copre:
+- creazione e attivazione parent profile senza scrivere YAML a mano,
+- upload knowledge per parent,
+- lancio campagne locali da CSV,
+- sync Drive-native dal workspace,
+- monitoraggio job e campagne recenti.
+
 ### Parent context
 
 ```bash
@@ -151,6 +168,23 @@ emailgenius workspace sync-once \
   --slug azienda-a \
   --workspace-folder-id "<GOOGLE_DRIVE_FOLDER_ID>"
 ```
+
+Modello Drive consigliato per la UI:
+
+```text
+PARENTS/
+  azienda-a/
+    PROFILE/profile.yaml
+    KNOWLEDGE/
+    LEADS/
+    OUTPUT/
+```
+
+Con questa struttura:
+- il nome cartella `azienda-a` diventa il `parent_slug`,
+- i documenti in `KNOWLEDGE/` vengono indicizzati su quel parent,
+- gli Sheet in `LEADS/` ereditano automaticamente quel parent,
+- i documenti generati finiscono in `OUTPUT/`.
 
 ```bash
 emailgenius campaign status --campaign-id <campaign_id>
