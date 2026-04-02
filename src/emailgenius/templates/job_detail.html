@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block title %}Job {{ job.job_id if job is defined else "" }} - EmailGenius{% endblock %}
+{% block eyebrow %}Processing job{% endblock %}
+{% block page_title %}Job detail{% endblock %}
+{% block page_intro %}Track sync, ingestion, and campaign generation without opening the database directly.{% endblock %}
+
+{% block content %}
+  <section class="hero-grid">
+    <article class="hero-card">
+      <p class="kicker">Status</p>
+      <h2>{{ job.status if job is defined and job.status else "Unknown" }}</h2>
+      <p>{{ job.error_message if job is defined and job.error_message else "No error reported." }}</p>
+    </article>
+    <article class="stat-card">
+      <p class="kicker">Type</p>
+      <strong>{{ job.kind if job is defined and job.kind else "—" }}</strong>
+      <span>job category</span>
+    </article>
+    <article class="stat-card">
+      <p class="kicker">Parent</p>
+      <strong>{{ job.parent_slug if job is defined and job.parent_slug else "—" }}</strong>
+      <span>workload owner</span>
+    </article>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <div>
+        <p class="kicker">Timeline</p>
+        <h3>Execution details</h3>
+      </div>
+    </div>
+    <dl class="detail-grid">
+      <div><dt>Job id</dt><dd>{{ job.job_id if job is defined and job.job_id else "—" }}</dd></div>
+      <div><dt>Started</dt><dd>{{ job.started_at if job is defined and job.started_at else "—" }}</dd></div>
+      <div><dt>Updated</dt><dd>{{ job.updated_at if job is defined and job.updated_at else "—" }}</dd></div>
+      <div><dt>Retries</dt><dd>{{ job.retry_count if job is defined and job.retry_count is not none else "0" }}</dd></div>
+      <div class="full-width"><dt>Payload</dt><dd><pre class="code-block">{{ job.payload_json if job is defined and job.payload_json else "{}" }}</pre></dd></div>
+    </dl>
+  </section>
+{% endblock %}

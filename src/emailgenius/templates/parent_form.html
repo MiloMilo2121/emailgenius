@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block title %}Parent profile - EmailGenius{% endblock %}
+{% block eyebrow %}Parent profile{% endblock %}
+{% block page_title %}{{ "Edit parent" if parent is defined and parent else "New parent" }}{% endblock %}
+{% block page_intro %}Use one parent folder per client or brand, then keep profile, knowledge, and leads together.{% endblock %}
+
+{% block content %}
+  <section class="two-column">
+    <form class="panel form-panel" method="post" enctype="multipart/form-data">
+      <div class="panel-header">
+        <div>
+          <p class="kicker">Profile</p>
+          <h3>Parent identity</h3>
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <label>
+          <span>Slug</span>
+          <input name="slug" value="{{ parent.slug if parent is defined and parent else '' }}" placeholder="azienda-a" required>
+        </label>
+        <label>
+          <span>Company name</span>
+          <input name="company_name" value="{{ parent.company_name if parent is defined and parent else '' }}" placeholder="Azienda A Srl" required>
+        </label>
+        <label>
+          <span>Tone</span>
+          <input name="tone" value="{{ parent.tone if parent is defined and parent else '' }}" placeholder="formale-consulenziale" required>
+        </label>
+        <label>
+          <span>CTA policy</span>
+          <input name="cta_policy" value="{{ parent.cta_policy if parent is defined and parent else '' }}" placeholder="call conoscitiva 20-30 min">
+        </label>
+        <label class="full-width">
+          <span>Offer catalog</span>
+          <textarea name="offer_catalog" rows="4" placeholder="One item per line">{{ (parent.offer_catalog | join('\n')) if parent is defined and parent else '' }}</textarea>
+        </label>
+        <label class="full-width">
+          <span>ICP</span>
+          <textarea name="icp" rows="4" placeholder="One item per line">{{ (parent.icp | join('\n')) if parent is defined and parent else '' }}</textarea>
+        </label>
+        <label class="full-width">
+          <span>Proof points</span>
+          <textarea name="proof_points" rows="4" placeholder="One item per line">{{ (parent.proof_points | join('\n')) if parent is defined and parent else '' }}</textarea>
+        </label>
+        <label class="full-width">
+          <span>Objections</span>
+          <textarea name="objections" rows="4" placeholder="One item per line">{{ (parent.objections | join('\n')) if parent is defined and parent else '' }}</textarea>
+        </label>
+        <label class="full-width">
+          <span>No-go claims</span>
+          <textarea name="no_go_claims" rows="4" placeholder="One item per line">{{ (parent.no_go_claims | join('\n')) if parent is defined and parent else '' }}</textarea>
+        </label>
+        <label class="full-width">
+          <span>Compliance notes</span>
+          <textarea name="compliance_notes" rows="4" placeholder="One item per line">{{ (parent.compliance_notes | join('\n')) if parent is defined and parent else '' }}</textarea>
+        </label>
+        <label class="full-width">
+          <span>Seed template</span>
+          <textarea name="outreach_seed_template" rows="8" placeholder="Email seed template">{{ parent.outreach_seed_template if parent is defined and parent else '' }}</textarea>
+        </label>
+      </div>
+
+      <div class="card-actions">
+        <button class="button button-primary" type="submit">Save parent</button>
+        <a class="button button-ghost" href="{{ url_for('parents') }}">Cancel</a>
+      </div>
+    </form>
+
+    <aside class="panel soft-panel">
+      <p class="kicker">Drive structure</p>
+      <h3>Recommended folder layout</h3>
+      <pre class="code-block">PARENTS/
+  azienda-a/
+    PROFILE/profile.yaml
+    KNOWLEDGE/
+    LEADS/
+    OUTPUT/</pre>
+      <p>This keeps the mapping deterministic: the folder name is the parent slug.</p>
+    </aside>
+  </section>
+{% endblock %}

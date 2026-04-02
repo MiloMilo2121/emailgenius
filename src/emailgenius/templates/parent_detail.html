@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}{{ parent.company_name }} - EmailGenius{% endblock %}
+{% block eyebrow %}Parent profile{% endblock %}
+{% block page_title %}{{ parent.company_name }}{% endblock %}
+{% block page_intro %}{{ parent.slug }} · {{ parent.tone }}{% endblock %}
+{% block topbar_actions %}
+  <a class="button button-secondary" href="{{ url_for('parent_edit', slug=parent.slug) }}">Edit parent</a>
+  <a class="button button-primary" href="{{ url_for('campaign_new', slug=parent.slug) }}">Run campaign</a>
+{% endblock %}
+
+{% block content %}
+  <section class="hero-grid">
+    <article class="hero-card">
+      <p class="kicker">Profile</p>
+      <h2>{{ parent.sender_name or parent.company_name }}</h2>
+      <p>{{ parent.outreach_seed_template }}</p>
+    </article>
+    <article class="stat-card">
+      <p class="kicker">Knowledge docs</p>
+      <strong>{{ metrics.knowledge_docs if metrics is defined and metrics.knowledge_docs is not none else "—" }}</strong>
+      <span>ingested for this parent</span>
+    </article>
+    <article class="stat-card">
+      <p class="kicker">Campaigns</p>
+      <strong>{{ metrics.campaigns if metrics is defined and metrics.campaigns is not none else "—" }}</strong>
+      <span>linked to this parent</span>
+    </article>
+  </section>
+
+  <section class="layout-grid">
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <p class="kicker">Knowledge</p>
+          <h3>Indexed documents</h3>
+        </div>
+      </div>
+      <div class="stack-list">
+        {% for item in knowledge_docs or [] %}
+          <div class="list-row">
+            <div>
+              <strong>{{ item.kind }}</strong>
+              <span>{{ item.source_path }}</span>
+            </div>
+            <span class="pill">{{ item.created_at }}</span>
+          </div>
+        {% else %}
+          <div class="empty-state">No knowledge documents found for this parent.</div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <p class="kicker">Campaigns</p>
+          <h3>Recent runs</h3>
+        </div>
+      </div>
+      <div class="stack-list">
+        {% for campaign in campaigns or [] %}
+          <a class="list-row" href="{{ url_for('campaign_detail', campaign_id=campaign.campaign_id) }}">
+            <div>
+              <strong>{{ campaign.campaign_id }}</strong>
+              <span>{{ campaign.status }} · {{ campaign.created_at if campaign.created_at is defined else "" }}</span>
+            </div>
+            <span class="pill">{{ campaign.generated_total or 0 }} generated</span>
+          </a>
+        {% else %}
+          <div class="empty-state">No campaigns for this parent yet.</div>
+        {% endfor %}
+      </div>
+    </section>
+  </section>
+{% endblock %}
