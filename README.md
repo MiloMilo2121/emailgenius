@@ -10,7 +10,12 @@ Sistema CLI + app locale per campagne email B2B multi-azienda madre con:
 - coda approvazione su Google Sheet + export CSV send-ready (outer join input+output),
 - retention automatica dati campagna (default 90 giorni).
 
-Non serve Supabase per questa fase: l'app usa gia `PostgreSQL` come source of truth e `Google Drive` come data room.
+Direzione consigliata:
+- `App-first`: lavori sempre dalla UI.
+- `PostgreSQL locale`: salva parent, knowledge, campagne e output.
+- `Google Drive`: opzionale, solo se vuoi import/export o collaborazione Workspace.
+
+Non serve Supabase per questa fase: l'app usa gia `PostgreSQL` come source of truth e puo` vivere interamente in locale.
 
 ## Requisiti
 
@@ -19,7 +24,28 @@ Non serve Supabase per questa fase: l'app usa gia `PostgreSQL` come source of tr
 - (opzionale) Chromium Playwright per enrichment web profondo
 - (opzionale) credenziali Google Service Account per publish su Sheet
 
-## Setup
+## Setup consigliato
+
+Setup a sbattimento minimo:
+
+1. Installa Docker Desktop.
+2. Copia `.env.example` in `.env.local`.
+3. Inserisci almeno `OPENAI_API_KEY` in `.env.local`.
+4. Avvia tutto con lo script locale.
+
+```bash
+cp .env.example .env.local
+./scripts/start-local.sh
+```
+
+Poi apri [http://127.0.0.1:8080](http://127.0.0.1:8080).
+
+Questo flusso:
+- avvia PostgreSQL locale con volume persistente Docker,
+- usa `.emailgenius/` per file runtime, upload, report e backup,
+- lascia Drive completamente opzionale.
+
+## Setup manuale
 
 ```bash
 python3 -m venv .venv
@@ -49,6 +75,14 @@ export EMAILGENIUS_IO_MODE="local"
 `OPENAI_BASE_URL`/`EMAILGENIUS_OPENAI_BASE_URL` permette di usare endpoint OpenAI-compatible
 (es. Z.AI, DeepSeek, Kimi). Se il provider primario fallisce, `EMAILGENIUS_OPENAI_FALLBACK_*`
 viene usato come backup.
+
+`EMAILGENIUS_HOME` default: `.emailgenius/`
+
+Dentro `EMAILGENIUS_HOME` trovi:
+- `web-uploads/` per file caricati dalla UI
+- `web-reports/` per export e report UI
+- `backups/` per dump database
+- `google-oauth-token.json` se usi OAuth Google
 
 ## Parent profile (YAML)
 
@@ -92,7 +126,7 @@ outreach_seed_template: |
 Avvia la UI locale:
 
 ```bash
-emailgenius app serve --host 127.0.0.1 --port 8080
+./scripts/start-local.sh
 ```
 
 La UI copre:
@@ -101,6 +135,24 @@ La UI copre:
 - lancio campagne locali da CSV,
 - sync Drive-native dal workspace,
 - monitoraggio job e campagne recenti.
+
+Per fermare il database locale:
+
+```bash
+./scripts/stop-local.sh
+```
+
+Backup del database locale:
+
+```bash
+./scripts/backup-db.sh
+```
+
+Restore da backup:
+
+```bash
+./scripts/restore-db.sh .emailgenius/backups/<backup>.sql --yes
+```
 
 ### Parent context
 
@@ -139,7 +191,7 @@ emailgenius campaign run \
   --cost-cap-eur 50
 ```
 
-Drive-native (Data Room):
+Drive-native (opzionale):
 
 ```bash
 emailgenius campaign run \
@@ -169,7 +221,7 @@ emailgenius workspace sync-once \
   --workspace-folder-id "<GOOGLE_DRIVE_FOLDER_ID>"
 ```
 
-Modello Drive consigliato per la UI:
+Modello Drive opzionale:
 
 ```text
 PARENTS/
@@ -230,6 +282,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py' -v
 - Nessun invio automatico email in questa release.
 - Default `--llm-policy strict`: senza almeno una key (`OPENAI_API_KEY` o `EMAILGENIUS_OPENAI_FALLBACK_API_KEY`) la campagna si ferma.
 - Usa `--llm-policy fallback` per degradare a copy deterministico locale.
-- Drive-native Data Room: crea nella cartella workspace le sottocartelle `Profiles`, `Knowledge`, `Knowledge/Processed`, `Input Leads`, `Output Sequences`.
-- Condividi la cartella workspace in Editor con l'email del service account (`...iam.gserviceaccount.com`).
-- Verifica che nel progetto GCP siano abilitate Google Drive API, Google Docs API e Google Sheets API.
+- La persistenza locale vera sta in due posti:
+  - volume Docker `emailgenius_pg_data` per PostgreSQL
+  - cartella `.emailgenius/` per runtime file
+- Se chiudi l'app e la riapri, i dati restano.
+- Drive-native Data Room e` opzionale: usalo solo se ti serve integrazione Google.
+- Se vuoi Drive: condividi la cartella workspace in Editor con l'email del service account (`...iam.gserviceaccount.com`) e abilita Google Drive API, Google Docs API e Google Sheets API.

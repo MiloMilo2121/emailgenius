@@ -37,7 +37,7 @@ def create_app(
 
     templates_dir = Path(__file__).with_name("templates")
     static_dir = Path(__file__).with_name("static")
-    reports_dir = Path("reports")
+    reports_dir = app_home() / "web-reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     app = FastAPI(title="EmailGenius App")
@@ -536,7 +536,13 @@ def _ui_state(request: Request) -> dict[str, str]:
 
 
 def _config_summary(config: AppConfig) -> dict[str, object]:
+    database_target = "Postgres remoto"
+    database_url = (config.database_url or "").lower()
+    if "localhost" in database_url or "127.0.0.1" in database_url:
+        database_target = "Postgres locale"
     return {
+        "data_home": str(app_home()),
+        "database_target": database_target,
         "workspace_folder_id": config.workspace_folder_id or "",
         "llm_configured": bool(config.openai_api_key or config.openai_fallback_api_key),
         "google_configured": bool(config.google_service_account_json),

@@ -3,16 +3,21 @@
 {% block content %}
   <section class="hero card">
     <div>
-      <p class="eyebrow">Local app over the existing engine</p>
+      <p class="eyebrow">App-first workflow</p>
       <h1>Genera email senza passare dal terminale.</h1>
       <p class="lede">
-        La UI usa lo stesso motore della CLI: Postgres per stato e RAG, Google Drive per workspace, stessi controlli su costi e compliance.
+        La UI usa lo stesso motore della CLI, ma il flusso consigliato e` tutto dentro l'app:
+        parent profile, knowledge, lead e campagne. Google Drive resta opzionale per import o export.
       </p>
     </div>
     <div class="hero-grid">
       <div class="metric">
-        <span>Workspace</span>
-        <strong>{{ config_summary.workspace_folder_id or "non configurato" }}</strong>
+        <span>Dati app</span>
+        <strong>{{ config_summary.data_home }}</strong>
+      </div>
+      <div class="metric">
+        <span>Database</span>
+        <strong>{{ config_summary.database_target }}</strong>
       </div>
       <div class="metric">
         <span>LLM</span>
@@ -28,16 +33,15 @@
   <section class="grid-two">
     <article class="card">
       <div class="section-head">
-        <p class="eyebrow">Modello Drive consigliato</p>
-        <h2>1 cartella per parent</h2>
+        <p class="eyebrow">Flusso consigliato</p>
+        <h2>Tutto dall'app</h2>
       </div>
-      <pre class="code-block">PARENTS/
-  azienda-a/
-    PROFILE/profile.yaml
-    KNOWLEDGE/
-    LEADS/
-    OUTPUT/</pre>
-      <p class="muted">Se usi questa struttura, la cartella stessa identifica il parent. Niente prefissi file, niente parent_slug da ricordare a mano.</p>
+      <pre class="code-block">1. Crea il parent
+2. Carica i documenti knowledge
+3. Carica il CSV lead
+4. Avvia la generazione
+5. Riapri l'app quando vuoi: i dati restano salvati</pre>
+      <p class="muted">Il database resta locale e persistente. Drive non e` obbligatorio.</p>
     </article>
 
     <article class="card">
@@ -136,7 +140,7 @@
     <article class="card stack-card">
       <div class="section-head">
         <p class="eyebrow">Azioni rapide</p>
-        <h2>Knowledge e campagne</h2>
+        <h2>Knowledge, lead e campagne</h2>
       </div>
 
       <form action="/knowledge/upload" method="post" enctype="multipart/form-data" class="form-grid compact">
@@ -183,6 +187,11 @@
       </form>
 
       <form action="/campaigns/drive" method="post" class="form-grid compact">
+        <div class="full">
+          <p class="eyebrow">Integrazione opzionale</p>
+          <h3>Sync da Google Drive</h3>
+          <p class="muted">Usalo solo se vuoi importare o esportare tramite Google Workspace. Non serve per il flusso base.</p>
+        </div>
         <label>
           <span>Fallback parent slug</span>
           <input name="slug" value="{{ active_parent_slug or '' }}">

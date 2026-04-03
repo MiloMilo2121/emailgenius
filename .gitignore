@@ -3,7 +3,8 @@ __pycache__/
 .DS_Store
 .venv/
 .pytest_cache/
-reports/*.json
+reports/
 .emailgenius/
+.env.local
 
 *.egg-info/

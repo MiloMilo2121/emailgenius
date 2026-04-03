@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -166,6 +170,31 @@ class WebAppTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["job_id"], job.job_id)
         self.assertEqual(payload["label"], "Sync Drive azienda-a")
+
+    def test_reports_static_are_served_from_emailgenius_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"EMAILGENIUS_HOME": tmpdir}):
+            reports_dir = Path(tmpdir) / "web-reports"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            (reports_dir / "sample.txt").write_text("report ok", encoding="utf-8")
+
+            app = create_app(
+                config=AppConfig(
+                    database_url="postgresql://local",
+                    openai_api_key=None,
+                    openai_base_url=None,
+                    openai_chat_model="gpt-5",
+                    openai_embedding_model="text-embedding-3-small",
+                    google_service_account_json=None,
+                    retention_days=90,
+                ),
+                store_factory=lambda: self.store,
+                llm_factory=lambda: _FakeLLM(),  # type: ignore[return-value]
+            )
+            client = TestClient(app)
+
+            response = client.get("/reports/sample.txt")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.text, "report ok")
 
 
 if __name__ == "__main__":
