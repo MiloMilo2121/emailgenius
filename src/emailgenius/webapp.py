@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import shutil
 import threading
 import traceback
@@ -21,6 +23,26 @@ from .llm import LLMGateway
 from .storage import PostgresStore
 from .types import ParentProfile
 from .utils import slugify
+
+INSTANTLY_EXPORT_COLUMNS = [
+    "Email",
+    "FirstName",
+    "LastName",
+    "CompanyName",
+    "SubjectLine",
+    "Personalization",
+    "CampaignId",
+    "ParentSlug",
+]
+
+INSTANTLY_TEMPLATE_BODY = (
+    "Ciao {{FirstName}},\n\n"
+    "ho guardato il contesto di {{CompanyName}} e mi sembra ci sia un angolo interessante.\n\n"
+    "{{Personalization}}\n\n"
+    "Se ha senso, ti mando due dettagli operativi in piu.\n\n"
+    "{{SenderName}}\n"
+    "{{SenderCompany}}"
+)
 
 
 def create_app(
@@ -302,7 +324,14 @@ def create_app(
         summary = store.get_campaign_summary(campaign_id)
         if summary is None:
             raise HTTPException(status_code=404, detail="Campaign not found")
-        records = [_campaign_record_view(row) for row in store.list_campaign_records(campaign_id)]
+        parent = store.get_parent_profile(str(summary.get("parent_slug") or ""))
+        raw_records = store.list_campaign_records(campaign_id)
+        records = [_campaign_record_view(row) for row in raw_records]
+        instantly_preview = _build_instantly_preview(
+            campaign_id=campaign_id,
+            parent=parent,
+            records=raw_records,
+        )
         return _templates(request).TemplateResponse(
             request,
             "campaign_detail.html",
@@ -312,6 +341,35 @@ def create_app(
                 "ui": _ui_state(request),
                 "summary": summary,
                 "records": records,
+                "parent": parent,
+                "instantly_preview": instantly_preview,
+                "instantly_download_url": str(
+                    request.url_for("campaign_instantly_export", campaign_id=campaign_id)
+                ),
+            },
+        )
+
+    @app.get("/campaigns/{campaign_id}/export/instantly.csv", name="campaign_instantly_export", response_model=None)
+    def campaign_instantly_export(request: Request, campaign_id: str) -> Response:
+        store = _get_store(request)
+        summary = store.get_campaign_summary(campaign_id)
+        if summary is None:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        parent = store.get_parent_profile(str(summary.get("parent_slug") or ""))
+        raw_records = store.list_campaign_records(campaign_id)
+        rows = _build_instantly_export_rows(
+            campaign_id=campaign_id,
+            parent=parent,
+            records=raw_records,
+        )
+        csv_text = _render_csv(rows, fieldnames=INSTANTLY_EXPORT_COLUMNS)
+        filename = f"campaign-{campaign_id}-instantly.csv"
+        return Response(
+            content=csv_text,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-store",
             },
         )
 
@@ -654,6 +712,165 @@ def _campaign_record_view(record: dict[str, object]) -> dict[str, object]:
         "final_subject": str(payload.get("final_subject") or ""),
         "final_body": str(payload.get("final_body") or ""),
     }
+
+
+def _build_instantly_preview(
+    *,
+    campaign_id: str,
+    parent: ParentProfile | None,
+    records: list[dict[str, object]],
+) -> dict[str, object]:
+    export_rows = _build_instantly_export_rows(
+        campaign_id=campaign_id,
+        parent=parent,
+        records=records,
+    )
+    return {
+        "columns": INSTANTLY_EXPORT_COLUMNS,
+        "template_subject": "{{SubjectLine}}",
+        "template_body": _instantly_template_body(parent),
+        "signature_name": (parent.sender_name if parent else "") or "",
+        "signature_company": (parent.sender_company if parent and parent.sender_company else (parent.company_name if parent else "")),
+        "rows": export_rows[:3],
+    }
+
+
+def _build_instantly_export_rows(
+    *,
+    campaign_id: str,
+    parent: ParentProfile | None,
+    records: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for record in records:
+        payload = record.get("payload_json")
+        if not isinstance(payload, dict):
+            payload = {}
+        contact_payload = payload.get("contact")
+        company_payload = payload.get("company")
+        dossier_payload = payload.get("dossier")
+        sequence_payload = payload.get("sequence_result")
+        contact = contact_payload if isinstance(contact_payload, dict) else {}
+        company = company_payload if isinstance(company_payload, dict) else {}
+        dossier = dossier_payload if isinstance(dossier_payload, dict) else {}
+        sequence_result = sequence_payload if isinstance(sequence_payload, dict) else {}
+        sequence_steps = sequence_result.get("steps") if isinstance(sequence_result.get("steps"), list) else []
+
+        email = _first_non_empty(
+            str(record.get("contact_email") or ""),
+            str((contact or {}).get("email") or ""),
+        )
+        full_name = _first_non_empty(
+            str(record.get("contact_name") or ""),
+            str((contact or {}).get("full_name") or ""),
+        )
+        first_name, last_name = _split_full_name(full_name)
+        company_name = _first_non_empty(
+            str(record.get("company_name") or ""),
+            str((company or {}).get("company_name") or ""),
+        )
+        first_step_subject = ""
+        if sequence_steps:
+            first_step = sequence_steps[0]
+            if isinstance(first_step, dict):
+                first_step_subject = str(first_step.get("subject") or "").strip()
+        subject_line = _first_non_empty(
+            str(payload.get("final_subject") or ""),
+            str(payload.get("recommended_subject") or ""),
+            first_step_subject,
+        )
+        personalization = _build_personalization_snippet(
+            company_name=company_name,
+            payload=payload,
+        )
+
+        rows.append(
+            {
+                "Email": email,
+                "FirstName": first_name,
+                "LastName": last_name,
+                "CompanyName": company_name,
+                "SubjectLine": subject_line,
+                "Personalization": personalization,
+                "CampaignId": campaign_id,
+                "ParentSlug": str(record.get("parent_slug") or (parent.slug if parent else "") or ""),
+            }
+        )
+
+    return rows
+
+
+def _build_personalization_snippet(*, company_name: str, payload: dict[str, object]) -> str:
+    sequence_result = payload.get("sequence_result")
+    if isinstance(sequence_result, dict):
+        trigger_facts = sequence_result.get("trigger_facts")
+        if isinstance(trigger_facts, list):
+            for item in trigger_facts:
+                text = str(item or "").strip()
+                if text:
+                    return f"Ho visto il segnale recente su {text} e mi sembra il momento giusto per parlarne."
+        attack_angle = str(sequence_result.get("attack_angle") or "").strip()
+        if attack_angle:
+            return f"Mi ha colpito l'angolo {attack_angle} su {company_name}."
+
+    dossier = payload.get("dossier")
+    if isinstance(dossier, dict):
+        news_items = dossier.get("news_items")
+        if isinstance(news_items, list):
+            for item in news_items:
+                title = str(item.get("title") or "").strip() if isinstance(item, dict) else ""
+                if title:
+                    return f"Ho visto la notizia '{title}' e ho preparato un'idea molto concreta per voi."
+        evidence = dossier.get("evidence")
+        if isinstance(evidence, list):
+            for item in evidence:
+                text = str(item or "").strip()
+                if text:
+                    return f"Ho preso spunto da questo segnale su {company_name}: {text}."
+        site_summary = str(dossier.get("site_summary") or "").strip()
+        if site_summary:
+            return f"Ho guardato il contesto di {company_name} e ci sono un paio di segnali interessanti."
+
+    company = payload.get("company")
+    if isinstance(company, dict):
+        industry = str(company.get("industry") or "").strip()
+        location = str(company.get("location") or "").strip()
+        if industry or location:
+            chunk = " / ".join(part for part in [industry, location] if part)
+            return f"Ho visto che operate in {chunk} e mi sembra un contesto molto specifico."
+
+    return f"Ho preparato un angolo personalizzato per {company_name}."
+
+
+def _instantly_template_body(parent: ParentProfile | None) -> str:
+    sender_name = (parent.sender_name if parent else "") or "Team EmailGenius"
+    sender_company = (parent.sender_company if parent and parent.sender_company else (parent.company_name if parent else ""))
+    return INSTANTLY_TEMPLATE_BODY.replace("{{SenderName}}", sender_name).replace("{{SenderCompany}}", sender_company)
+
+
+def _render_csv(rows: list[dict[str, object]], *, fieldnames: list[str]) -> str:
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
+
+
+def _split_full_name(value: str) -> tuple[str, str]:
+    parts = [part for part in value.split() if part]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+
+
+def _first_non_empty(*values: str) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _resolve_ui_parent_slug(store: PostgresStore) -> str:

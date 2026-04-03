@@ -88,10 +88,33 @@ class _FakeStore:
     def list_campaign_records(self, campaign_id: str):
         return [
             {
+                "id": "record-1",
+                "parent_slug": "azienda-a",
                 "company_name": "Beta SRL",
+                "company_key": "beta-srl",
                 "contact_name": "Anna Verdi",
+                "contact_title": "Owner",
+                "contact_email": "anna@example.com",
                 "status": "PENDING",
-                "payload_json": {"final_subject": "Subject A", "final_body": "Body A"},
+                "payload_json": {
+                    "final_subject": "Subject A",
+                    "final_body": "Body A",
+                    "company": {"company_name": "Beta SRL", "industry": "manufacturing", "location": "Brescia"},
+                    "contact": {"full_name": "Anna Verdi", "email": "anna@example.com"},
+                    "dossier": {
+                        "site_summary": "Beta SRL produce componenti meccanici.",
+                        "news_items": [{"title": "Nuovo stabilimento a Brescia", "url": "https://example.com/news"}],
+                        "evidence": ["Homepage title: Beta SRL"],
+                        "sources": ["https://example.com"],
+                    },
+                    "sequence_result": {
+                        "attack_angle": "nuovo stabilimento",
+                        "trigger_facts": ["Nuovo stabilimento a Brescia"],
+                        "steps": [
+                            {"step_id": "E1", "subject": "Subject A", "body": "Body A"},
+                        ],
+                    },
+                },
             }
         ]
 
@@ -157,6 +180,19 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Subject A", response.text)
         self.assertIn("Body A", response.text)
+        self.assertIn("Instantly export", response.text)
+        self.assertIn("{{Personalization}}", response.text)
+
+    def test_campaign_instantly_csv_download(self) -> None:
+        response = self.client.get("/campaigns/camp-1/export/instantly.csv")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("attachment; filename=\"campaign-camp-1-instantly.csv\"", response.headers["content-disposition"])
+        csv_text = response.text
+        self.assertIn("Email,FirstName,LastName,CompanyName,SubjectLine,Personalization,CampaignId,ParentSlug", csv_text)
+        self.assertIn("anna@example.com", csv_text)
+        self.assertIn("Beta SRL", csv_text)
+        self.assertIn("Subject A", csv_text)
+        self.assertIn("Nuovo stabilimento a Brescia", csv_text)
 
     def test_job_detail_returns_json_when_requested(self) -> None:
         job = self.app.state.jobs.create(

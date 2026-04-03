@@ -20,6 +20,71 @@
     {% endif %}
   </section>
 
+  <section class="grid-two">
+    <article class="card">
+      <div class="section-head">
+        <p class="eyebrow">Instantly export</p>
+        <h2>CSV pronto da importare</h2>
+      </div>
+      <p class="muted">
+        Il CSV contiene i campi per l'import in Instantly. Il template sotto usa una sola variabile dinamica
+        nel corpo: <code>{{ '{{Personalization}}' }}</code>.
+      </p>
+      <a class="button" href="{{ instantly_download_url }}">Scarica CSV Instantly</a>
+    </article>
+
+    <article class="card">
+      <div class="section-head">
+        <p class="eyebrow">Template preview</p>
+        <h2>Da copiare in Instantly</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Campo</th>
+              <th>Uso</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for column in instantly_preview.columns %}
+              <tr>
+                <td><code>{{ column }}</code></td>
+                <td>
+                  {% if column == "Personalization" %}
+                    Variabile centrale nel mezzo dell'email
+                  {% elif column == "SubjectLine" %}
+                    Oggetto email per riga
+                  {% elif column == "Email" %}
+                    Destinatario
+                  {% else %}
+                    Dato lead o campagna
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+
+  <section class="card">
+    <div class="section-head">
+      <p class="eyebrow">Instantly body</p>
+      <h2>Template suggerito</h2>
+    </div>
+    <pre class="code-block">Subject: {{ '{{SubjectLine}}' }}
+
+{{ instantly_preview.template_body }}</pre>
+    <p class="muted">
+      Signature prevista: <strong>{{ instantly_preview.signature_name or "-" }}</strong>
+      {% if instantly_preview.signature_company %}
+        - <strong>{{ instantly_preview.signature_company }}</strong>
+      {% endif %}
+    </p>
+  </section>
+
   <section class="card">
     <div class="section-head">
       <p class="eyebrow">Generated records</p>
@@ -47,6 +112,37 @@
             </tr>
           {% else %}
             <tr><td colspan="5" class="muted">Nessun record salvato.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="section-head">
+      <p class="eyebrow">Instantly preview rows</p>
+      <h2>Prime righe esportate</h2>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Email</th>
+            <th>Company</th>
+            <th>Subject</th>
+            <th>Personalization</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in instantly_preview.rows %}
+            <tr>
+              <td>{{ row.Email or "-" }}</td>
+              <td>{{ row.CompanyName or "-" }}</td>
+              <td>{{ row.SubjectLine or "-" }}</td>
+              <td><div class="body-preview">{{ row.Personalization or "-" }}</div></td>
+            </tr>
+          {% else %}
+            <tr><td colspan="4" class="muted">Nessuna riga disponibile.</td></tr>
           {% endfor %}
         </tbody>
       </table>
