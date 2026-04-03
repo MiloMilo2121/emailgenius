@@ -191,6 +191,22 @@
           <span>CSV lead</span>
           <input type="file" name="leads_file" accept=".csv" required>
         </label>
+        <fieldset class="full checkbox-group">
+          <legend>Fonti di ricerca</legend>
+          <label class="checkbox">
+            <input type="checkbox" name="research_sources" value="web" checked>
+            <span>Web</span>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" name="research_sources" value="instagram">
+            <span>Instagram</span>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" name="research_sources" value="linkedin">
+            <span>LinkedIn</span>
+          </label>
+          <p class="muted">`Web` usa Exa. `Instagram` e `LinkedIn` aggiungono discovery pubblica su quei domini al dossier della riga.</p>
+        </fieldset>
         <label class="checkbox">
           <input type="checkbox" name="force_cost_override" value="1">
           <span>Forza run anche sopra il cost cap</span>

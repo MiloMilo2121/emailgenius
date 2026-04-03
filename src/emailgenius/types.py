@@ -39,6 +39,10 @@ class SearchHit:
     snippet: str = ""
 
 
+ALLOWED_RESEARCH_SOURCES = ("web", "instagram", "linkedin")
+DEFAULT_RESEARCH_SOURCES = ("web",)
+
+
 @dataclass(slots=True)
 class ResearchSource:
     title: str
@@ -150,6 +154,7 @@ class ResearchDossier:
     key_facts: list[str] = field(default_factory=list)
     recent_news: list[ResearchSource] = field(default_factory=list)
     citations: list[str] = field(default_factory=list)
+    research_sources: list[str] = field(default_factory=list)
     confidence: float = 0.0
 
 
@@ -231,6 +236,7 @@ class CampaignSummary:
     rows_failed: int = 0
     estimated_cost_eur: float = 0.0
     actual_cost_eur: float = 0.0
+    research_sources: list[str] = field(default_factory=list)
 
 
 JsonDict = dict[str, Any]

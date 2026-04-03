@@ -74,6 +74,7 @@ class _ResearchLLM:
             key_facts=["Nuovo impianto a Brescia", "settore manufacturing"],
             recent_news=[ResearchSource(title="Nuovo impianto a Brescia", url="https://example.com/news")],
             citations=["https://example.com/news"],
+            research_sources=list(research_bundle.get("selected_sources") or []),
             confidence=0.84,
         )
 
@@ -125,8 +126,13 @@ class CampaignResearchTests(unittest.TestCase):
     def test_local_campaign_uses_research_pipeline_when_exa_is_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch(
             "emailgenius.campaign.ExaClient.collect_company_research",
-            return_value={"company_name": "Beta SRL", "official_pages": {"results": []}, "news_results": {"results": []}},
-        ):
+            return_value={
+                "company_name": "Beta SRL",
+                "selected_sources": ["web", "instagram"],
+                "official_pages": {"results": []},
+                "news_results": {"results": []},
+            },
+        ) as mocked_collect:
             leads_path = Path(tmpdir) / "leads.csv"
             with leads_path.open("w", encoding="utf-8", newline="") as handle:
                 writer = csv.DictWriter(
@@ -163,15 +169,21 @@ class CampaignResearchTests(unittest.TestCase):
                 max_concurrency=1,
                 max_retries=1,
                 backoff_base_seconds=0.0,
+                research_sources=["web", "instagram"],
             )
 
             self.assertEqual(summary.rows_generated_ok, 1)
+            self.assertEqual(summary.research_sources, ["web", "instagram"])
             self.assertTrue(export_path.exists())
             self.assertEqual(rows[0].get("SubjectLine"), "Subject Research")
             self.assertIn("nuovo impianto", str(rows[0].get("Personalization") or "").lower())
+            self.assertEqual(rows[0].get("ResearchSources"), "web; instagram")
             result = store.inserted[0][0]
             self.assertIsNotNone(result.research_dossier)
             self.assertIsNotNone(result.instantly_draft)
+            self.assertEqual(result.research_dossier.research_sources, ["web", "instagram"])
+            self.assertEqual(store.inserted[0][1]["research_sources"], ["web", "instagram"])
+            self.assertEqual(mocked_collect.call_args.kwargs["research_sources"], ["web", "instagram"])
 
     def test_export_instantly_campaign_writes_expected_columns(self) -> None:
         store = _ResearchStore(self._profile())

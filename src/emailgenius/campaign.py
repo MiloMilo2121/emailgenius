@@ -37,6 +37,8 @@ from .llm import (
 from .sheets import approval_columns, publish_campaign_to_sheets
 from .storage import PostgresStore
 from .types import (
+    ALLOWED_RESEARCH_SOURCES,
+    DEFAULT_RESEARCH_SOURCES,
     ApprovalRecord,
     CampaignCompanyResult,
     CampaignSummary,
@@ -87,8 +89,10 @@ def run_campaign(
     force_cost_override: bool = False,
     io_mode: str = "local",
     workspace_folder_id: str | None = None,
+    research_sources: list[str] | None = None,
 ) -> tuple[CampaignSummary, Path, list[dict[str, object]]]:
     resolved_io_mode = (io_mode or "local").strip().lower()
+    selected_research_sources = _normalize_research_sources(research_sources)
     if resolved_io_mode not in {"local", "drive"}:
         raise ValueError("io_mode must be one of: local, drive")
 
@@ -112,6 +116,7 @@ def run_campaign(
             cost_cap_eur=cost_cap_eur,
             force_cost_override=force_cost_override,
             workspace_folder_id=workspace_folder_id or config.workspace_folder_id,
+            research_sources=selected_research_sources,
         )
 
     if stages != "all":
@@ -189,6 +194,7 @@ def run_campaign(
             output_schema=output_schema,
             memory_snippets=memory_snippets,
             research_client=research_client,
+            research_sources=selected_research_sources,
         )
         by_row_index = {item.row_index: item for item in outcomes}
         for row in preflight.rows:
@@ -243,6 +249,7 @@ def run_campaign(
                 output_schema=output_schema,
                 memory_snippets=memory_snippets,
                 research_client=research_client,
+                research_sources=selected_research_sources,
             )
             if outcome.fatal_error:
                 raise RuntimeError(outcome.error_message or "Fatal campaign error")
@@ -358,6 +365,7 @@ def run_campaign(
         rows_failed=rows_failed,
         estimated_cost_eur=estimated_cost_eur,
         actual_cost_eur=actual_cost_eur,
+        research_sources=selected_research_sources,
     )
     store.finalize_campaign(campaign_id, summary)
     store.purge_expired_campaign_data(config.retention_days)
@@ -384,6 +392,7 @@ def _run_campaign_drive_mode(
     cost_cap_eur: float,
     force_cost_override: bool,
     workspace_folder_id: str | None,
+    research_sources: list[str] | None = None,
 ) -> tuple[CampaignSummary, Path, list[dict[str, object]]]:
     if not workspace_folder_id:
         raise ValueError("workspace_folder_id is required when io_mode=drive")
@@ -671,6 +680,7 @@ def _run_campaign_drive_mode(
         rows_failed=rows_failed,
         estimated_cost_eur=estimated_cost_eur,
         actual_cost_eur=actual_cost_eur,
+        research_sources=list(research_sources or []),
     )
     store.finalize_campaign(campaign_id, summary)
     store.purge_expired_campaign_data(config.retention_days)
@@ -791,6 +801,13 @@ def export_campaign(store: PostgresStore, campaign_id: str, output_path: str, ou
         error_code = "" if passing else ("FAILED_COPY_GUARD" if by_name else str(payload.get("error_code") or ""))
         instantly_payload = payload.get("instantly_draft") if isinstance(payload, dict) else None
         research_payload = payload.get("research_dossier") if isinstance(payload, dict) else None
+        research_sources = (
+            (research_payload or {}).get("research_sources")
+            if isinstance(research_payload, dict)
+            else payload.get("research_sources")
+            if isinstance(payload, dict)
+            else []
+        )
 
         warning_parts: list[str] = []
         existing_warning = str(payload.get("generation_warning") or "") if isinstance(payload, dict) else ""
@@ -836,6 +853,11 @@ def export_campaign(store: PostgresStore, campaign_id: str, output_path: str, ou
                 "BodyTemplate": str((instantly_payload or {}).get("body_template") or ""),
                 "Angle": str((research_payload or {}).get("personalization_angle") or ""),
                 "Trigger": str((research_payload or {}).get("trigger_event") or ""),
+                "ResearchSources": "; ".join(
+                    str(item).strip() for item in research_sources if str(item).strip()
+                )
+                if isinstance(research_sources, list)
+                else "",
                 "Source1": (
                     str((research_payload or {}).get("citations", [""])[0] or "")
                     if isinstance((research_payload or {}).get("citations"), list)
@@ -940,6 +962,7 @@ def _run_row_mode(
     output_schema: str,
     memory_snippets: list[str],
     research_client: ExaClient,
+    research_sources: list[str],
 ) -> list[_RowOutcome]:
     valid_rows = [item for item in preflight.rows if item.is_valid]
     if not valid_rows:
@@ -972,6 +995,7 @@ def _run_row_mode(
                     memory_snippets=memory_snippets,
                     row_index=item.row_index,
                     research_client=research_client,
+                    research_sources=research_sources,
                 )
             for item in valid_rows
         ]
@@ -1008,6 +1032,7 @@ def _process_company_like_item(
     output_schema: str,
     memory_snippets: list[str],
     research_client: ExaClient,
+    research_sources: list[str],
     row_index: int = 0,
 ) -> _RowOutcome:
     company, contacts = build_company_and_contacts(canonical_rows)
@@ -1022,7 +1047,7 @@ def _process_company_like_item(
     enrichment_flags: list[str] = []
     nebula_payload: dict[str, object] = {}
 
-    if research_client.configured:
+    if research_client.configured and research_sources:
         return _process_company_with_instantly_pipeline(
             campaign_id=campaign_id,
             parent_slug=parent_slug,
@@ -1035,6 +1060,7 @@ def _process_company_like_item(
             llm_policy=llm_policy,
             output_schema=output_schema,
             research_client=research_client,
+            research_sources=research_sources,
             row_index=row_index,
         )
 
@@ -1292,12 +1318,14 @@ def _process_company_with_instantly_pipeline(
     llm_policy: str,
     output_schema: str,
     research_client: ExaClient,
+    research_sources: list[str],
     row_index: int,
 ) -> _RowOutcome:
     try:
         research_bundle = research_client.collect_company_research(
             company=company,
             contact=primary_contact,
+            research_sources=research_sources,
         )
         research_dossier = llm.generate_research_dossier(
             parent=parent,
@@ -1330,6 +1358,7 @@ def _process_company_with_instantly_pipeline(
                 "used_llm": True,
                 "template_only": False,
                 "research_mode": "exa_openrouter",
+                "research_sources": research_sources,
             },
             warning=True,
             failed=True,
@@ -1392,6 +1421,7 @@ def _process_company_with_instantly_pipeline(
         "template_only": False,
         "raw_row": raw_row,
         "research_mode": "exa_openrouter",
+        "research_sources": research_sources,
         "research_bundle": research_bundle,
     }
     return _RowOutcome(
@@ -1413,6 +1443,22 @@ def _resolve_enrichment_mode(*, recipient_mode: str, enrichment_mode: str) -> st
     if mode not in {"minimal", "hybrid", "web"}:
         raise ValueError("enrichment_mode must be one of: auto, minimal, hybrid, web")
     return mode
+
+
+def _normalize_research_sources(value: list[str] | None) -> list[str]:
+    if value is None:
+        raw_items = list(DEFAULT_RESEARCH_SOURCES)
+    else:
+        raw_items = list(value)
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        source = str(item or "").strip().lower()
+        if source not in ALLOWED_RESEARCH_SOURCES or source in seen:
+            continue
+        seen.add(source)
+        normalized.append(source)
+    return normalized
 
 
 def _resolve_export_schema(*, output_schema: str, summary: dict[str, object]) -> str:
@@ -1695,6 +1741,7 @@ def _skipped_validation_row(
             "BodyTemplate": "",
             "Angle": "",
             "Trigger": "",
+            "ResearchSources": "",
             "Source1": "",
             "status": "PENDING",
             "updated_at": utc_now_iso(),
@@ -1740,6 +1787,7 @@ def _error_row(
             "BodyTemplate": "",
             "Angle": "",
             "Trigger": "",
+            "ResearchSources": "",
             "Source1": "",
             "status": "PENDING",
             "updated_at": utc_now_iso(),
@@ -1795,6 +1843,7 @@ def _company_result_to_row(
             "BodyTemplate": instantly_draft.body_template if instantly_draft else "",
             "Angle": research_dossier.personalization_angle if research_dossier else "",
             "Trigger": research_dossier.trigger_event if research_dossier else "",
+            "ResearchSources": "; ".join(research_dossier.research_sources) if research_dossier else "",
             "Source1": (research_dossier.citations[0] if research_dossier and research_dossier.citations else ""),
             "status": result.approval.status,
             "reviewer_notes": result.approval.notes or "",

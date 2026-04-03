@@ -143,6 +143,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force run even when estimated cost exceeds cap",
     )
+    campaign_run.add_argument(
+        "--research-source",
+        action="append",
+        choices=["web", "instagram", "linkedin"],
+        dest="research_sources",
+        help="Research source to include. Repeat the flag to combine sources.",
+    )
 
     campaign_status_parser = campaign_sub.add_parser("status", help="Campaign status")
     campaign_status_parser.add_argument("--campaign-id", required=True, help="Campaign id")
@@ -550,6 +557,7 @@ def main() -> int:
                 force_cost_override=args.force_cost_override,
                 io_mode=args.io_mode,
                 workspace_folder_id=args.workspace_folder_id or config.workspace_folder_id,
+                research_sources=args.research_sources,
             )
             print(f"Campaign completed: {summary.campaign_id}")
             print(f"Companies: {summary.companies_total} | generated: {summary.generated_total} | warnings: {summary.warnings_total}")

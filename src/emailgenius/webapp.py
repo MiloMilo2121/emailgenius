@@ -241,8 +241,10 @@ def create_app(
         llm_policy: str = Form("strict"),
         cost_cap_eur: float = Form(50.0),
         force_cost_override: str = Form(""),
+        research_sources: list[str] | None = Form(None),
         leads_file: UploadFile = File(...),
     ) -> RedirectResponse:
+        resolved_research_sources = list(research_sources or ["web"])
         uploads_dir = app_home() / "web-uploads" / "csv"
         uploads_dir.mkdir(parents=True, exist_ok=True)
         suffix = Path(leads_file.filename or "leads.csv").suffix or ".csv"
@@ -254,7 +256,11 @@ def create_app(
             label=f"Campagna locale {slug}",
             kind="local_campaign",
             parent_slug=slug,
-            payload_json={"leads_csv_path": str(local_path), "llm_policy": llm_policy},
+            payload_json={
+                "leads_csv_path": str(local_path),
+                "llm_policy": llm_policy,
+                "research_sources": resolved_research_sources,
+            },
         )
         _launch_background_job(
             request.app,
@@ -266,6 +272,7 @@ def create_app(
             llm_policy=llm_policy,
             cost_cap_eur=float(cost_cap_eur),
             force_cost_override=bool(force_cost_override),
+            research_sources=resolved_research_sources,
         )
         return RedirectResponse(url=f"/jobs/{job.job_id}", status_code=303)
 
@@ -496,6 +503,7 @@ def _run_local_campaign_job(
     llm_policy: str,
     cost_cap_eur: float,
     force_cost_override: bool,
+    research_sources: list[str],
 ) -> tuple[str | None, str | None]:
     summary, export_path, _ = run_campaign(
         config=config,
@@ -520,6 +528,7 @@ def _run_local_campaign_job(
         force_cost_override=force_cost_override,
         io_mode="local",
         workspace_folder_id=None,
+        research_sources=research_sources,
     )
     return summary.campaign_id, str(export_path)
 

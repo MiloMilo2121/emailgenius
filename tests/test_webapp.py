@@ -147,6 +147,29 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Azienda A", response.text)
         self.assertIn("Genera email senza passare dal terminale", response.text)
+        self.assertIn('name="research_sources"', response.text)
+        self.assertIn("Instagram", response.text)
+        self.assertIn("LinkedIn", response.text)
+
+    def test_local_campaign_form_queues_research_sources(self) -> None:
+        with patch("emailgenius.webapp._launch_background_job") as mocked_launch:
+            response = self.client.post(
+                "/campaigns/local",
+                data={
+                    "slug": "azienda-a",
+                    "llm_policy": "strict",
+                    "cost_cap_eur": "12.5",
+                    "research_sources": ["web", "instagram"],
+                },
+                files={"leads_file": ("leads.csv", "Email,First Name,companyName\nanna@example.com,Anna,Beta SRL\n", "text/csv")},
+                follow_redirects=False,
+            )
+        self.assertEqual(response.status_code, 303)
+        self.assertTrue(response.headers["location"].startswith("/jobs/"))
+        _, kwargs = mocked_launch.call_args
+        self.assertEqual(kwargs["research_sources"], ["web", "instagram"])
+        job = self.app.state.jobs.list_recent(limit=1)[0]
+        self.assertEqual(job.payload_json["research_sources"], ["web", "instagram"])
 
     def test_parent_save_redirects_to_detail(self) -> None:
         response = self.client.post(

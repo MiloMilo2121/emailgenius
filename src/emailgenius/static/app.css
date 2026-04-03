@@ -207,6 +207,31 @@ a {
   grid-column: 1 / -1;
 }
 
+.checkbox-group {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.checkbox-group legend {
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.checkbox-group .checkbox {
+  grid-column: auto;
+  margin-bottom: 8px;
+}
+
+.checkbox-group .muted {
+  margin: 8px 0 0;
+}
+
 input,
 textarea,
 select,

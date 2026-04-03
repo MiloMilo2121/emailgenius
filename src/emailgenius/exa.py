@@ -8,7 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from .types import LeadCompany, LeadContact, ResearchSource
+from .types import ALLOWED_RESEARCH_SOURCES, DEFAULT_RESEARCH_SOURCES, LeadCompany, LeadContact, ResearchSource
 
 _EXA_SEARCH_URL = "https://api.exa.ai/search"
 
@@ -26,45 +26,75 @@ class ExaClient:
         *,
         company: LeadCompany,
         contact: LeadContact | None,
+        research_sources: list[str] | None = None,
         max_official_results: int = 3,
         max_news_results: int = 4,
     ) -> dict[str, object]:
         domain = _domain_from_url(company.website)
+        selected_sources = _normalize_research_sources(
+            research_sources,
+            default_to=list(DEFAULT_RESEARCH_SOURCES) if research_sources is None else [],
+        )
         company_query = company.company_name
         if domain:
             company_query = f"{company.company_name} {domain}"
 
-        company_lookup = self.search(
-            query=company_query,
-            category="company",
-            num_results=1,
-        )
-        official_pages = self.search(
-            query=f"{company.company_name} company overview services news",
-            include_domains=[domain] if domain else None,
-            num_results=max_official_results,
-        )
-        news_query = f"{company.company_name} recent news expansion investment partnership"
-        if contact and contact.title:
-            news_query = f"{news_query} {contact.title}"
-        news_results = self.search(
-            query=news_query,
-            category="news",
-            num_results=max_news_results,
-            start_published_date=(date.today() - timedelta(days=210)).isoformat(),
-        )
-
-        return {
+        bundle: dict[str, object] = {
             "company_name": company.company_name,
             "domain": domain,
-            "company_lookup": company_lookup,
-            "official_pages": official_pages,
-            "news_results": news_results,
+            "selected_sources": selected_sources,
             "contact": {
                 "full_name": contact.full_name if contact else "",
                 "title": contact.title if contact else "",
             },
         }
+        if "web" in selected_sources:
+            bundle["company_lookup"] = self.search(
+                query=company_query,
+                category="company",
+                num_results=1,
+            )
+            bundle["official_pages"] = self.search(
+                query=f"{company.company_name} company overview services news",
+                include_domains=[domain] if domain else None,
+                num_results=max_official_results,
+            )
+            news_query = f"{company.company_name} recent news expansion investment partnership"
+            if contact and contact.title:
+                news_query = f"{news_query} {contact.title}"
+            bundle["news_results"] = self.search(
+                query=news_query,
+                category="news",
+                num_results=max_news_results,
+                start_published_date=(date.today() - timedelta(days=210)).isoformat(),
+            )
+
+        if "instagram" in selected_sources:
+            bundle["instagram_profiles"] = self.search(
+                query=f"{company.company_name} instagram",
+                include_domains=["instagram.com"],
+                num_results=2,
+            )
+            bundle["instagram_posts"] = self.search(
+                query=f"{company.company_name} instagram reels posts",
+                include_domains=["instagram.com"],
+                num_results=3,
+            )
+
+        if "linkedin" in selected_sources:
+            linkedin_hint = (company.linkedin_company or "").strip() or company.company_name
+            bundle["linkedin_profiles"] = self.search(
+                query=f"{linkedin_hint} linkedin company",
+                include_domains=["linkedin.com"],
+                num_results=2,
+            )
+            bundle["linkedin_posts"] = self.search(
+                query=f"{company.company_name} linkedin company update post",
+                include_domains=["linkedin.com"],
+                num_results=3,
+            )
+
+        return bundle
 
     def search(
         self,
@@ -182,3 +212,17 @@ def _domain_from_url(url: str | None) -> str | None:
     if host.startswith("www."):
         host = host[4:]
     return host or None
+
+
+def _normalize_research_sources(value: list[str] | None, *, default_to: list[str]) -> list[str]:
+    if value is None:
+        return list(default_to)
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        normalized = str(item or "").strip().lower()
+        if normalized not in ALLOWED_RESEARCH_SOURCES or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out

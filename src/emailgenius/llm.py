@@ -572,6 +572,7 @@ class LLMGateway:
             "Sei un analyst B2B. "
             "Ricevi dati grezzi su un'azienda e devi restituire SOLO JSON valido. "
             "Non inventare nulla. Usa solo fatti osservabili nei risultati. "
+            "I risultati possono includere web, Instagram e LinkedIn pubblici. "
             "Scegli un trigger concreto se esiste; altrimenti lascia trigger_event vuoto. "
             "La personalizzazione deve essere utile per una cold email B2B italiana, non generica."
         )
@@ -1052,6 +1053,21 @@ def _research_dossier_from_payload(
 
     citations = payload.get("citations")
     key_facts = payload.get("key_facts")
+    selected_sources = research_bundle.get("selected_sources")
+    normalized_sources = (
+        [str(item).strip() for item in selected_sources if str(item).strip()]
+        if isinstance(selected_sources, list)
+        else []
+    )
+    resolved_citations = [str(item).strip() for item in citations if str(item).strip()] if isinstance(citations, list) else []
+    if not resolved_citations:
+        fallback_sources = (
+            recent_news[:2]
+            + _research_sources_from_bundle(research_bundle, "official_pages")[:1]
+            + _research_sources_from_bundle(research_bundle, "instagram_profiles")[:1]
+            + _research_sources_from_bundle(research_bundle, "linkedin_profiles")[:1]
+        )
+        resolved_citations = [item.url for item in fallback_sources if item.url]
     return ResearchDossier(
         company_name=company.company_name,
         domain=_domain_from_company(company),
@@ -1061,7 +1077,8 @@ def _research_dossier_from_payload(
         personalization_angle=str(payload.get("personalization_angle") or "").strip(),
         key_facts=[str(item).strip() for item in key_facts if str(item).strip()] if isinstance(key_facts, list) else [],
         recent_news=recent_news,
-        citations=[str(item).strip() for item in citations if str(item).strip()] if isinstance(citations, list) else [],
+        citations=resolved_citations,
+        research_sources=normalized_sources,
         confidence=_clamp(float(payload.get("confidence") or 0.65)),
     )
 
@@ -1073,6 +1090,10 @@ def _fallback_research_dossier(
 ) -> ResearchDossier:
     official_pages = _research_sources_from_bundle(research_bundle, "official_pages")
     news_results = _research_sources_from_bundle(research_bundle, "news_results")
+    instagram_profiles = _research_sources_from_bundle(research_bundle, "instagram_profiles")
+    instagram_posts = _research_sources_from_bundle(research_bundle, "instagram_posts")
+    linkedin_profiles = _research_sources_from_bundle(research_bundle, "linkedin_profiles")
+    linkedin_posts = _research_sources_from_bundle(research_bundle, "linkedin_posts")
     facts: list[str] = []
     if company.industry:
         facts.append(f"Settore: {company.industry}")
@@ -1084,11 +1105,35 @@ def _fallback_research_dossier(
         facts.append(f"Pagina rilevata: {official_pages[0].title}")
     if news_results:
         facts.append(f"Notizia recente: {news_results[0].title}")
+    if instagram_profiles:
+        facts.append(f"Profilo Instagram pubblico rilevato: {instagram_profiles[0].title}")
+    if instagram_posts:
+        facts.append(f"Contenuto Instagram rilevato: {instagram_posts[0].title}")
+    if linkedin_profiles:
+        facts.append(f"Profilo LinkedIn pubblico rilevato: {linkedin_profiles[0].title}")
+    if linkedin_posts:
+        facts.append(f"Aggiornamento LinkedIn rilevato: {linkedin_posts[0].title}")
 
     trigger_event = news_results[0].title if news_results else ""
+    if not trigger_event and linkedin_posts:
+        trigger_event = linkedin_posts[0].title
+    if not trigger_event and instagram_posts:
+        trigger_event = instagram_posts[0].title
     pain = "possibile bisogno di rendere piu' efficace il posizionamento commerciale su un momento aziendale concreto"
     angle = facts[0] if facts else f"Azienda osservata: {company.company_name}"
-    citations = [item.url for item in (news_results[:2] + official_pages[:2])]
+    citations = [
+        item.url
+        for item in (
+            news_results[:2]
+            + official_pages[:2]
+            + instagram_profiles[:1]
+            + instagram_posts[:1]
+            + linkedin_profiles[:1]
+            + linkedin_posts[:1]
+        )
+        if item.url
+    ]
+    selected_sources = research_bundle.get("selected_sources")
     return ResearchDossier(
         company_name=company.company_name,
         domain=_domain_from_company(company),
@@ -1099,6 +1144,7 @@ def _fallback_research_dossier(
         key_facts=facts[:5],
         recent_news=news_results[:4],
         citations=citations,
+        research_sources=[str(item).strip() for item in selected_sources if str(item).strip()] if isinstance(selected_sources, list) else [],
         confidence=0.45,
     )
 
