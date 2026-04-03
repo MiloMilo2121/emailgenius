@@ -38,6 +38,10 @@ class AppConfig:
     openai_fallback_api_key: str | None = None
     openai_fallback_base_url: str | None = None
     openai_fallback_chat_model: str | None = None
+    exa_api_key: str | None = None
+    research_model: str = "deepseek/deepseek-chat-v3.1"
+    writer_model: str = "anthropic/claude-3.5-haiku"
+    writer_fallback_model: str | None = None
 
 
     @classmethod
@@ -50,10 +54,15 @@ class AppConfig:
         io_mode = (os.getenv("EMAILGENIUS_IO_MODE") or "local").strip().lower() or "local"
         if io_mode not in {"local", "drive"}:
             io_mode = "local"
+        openrouter_api_key = _env_or_none("OPENROUTER_API_KEY")
+        openrouter_base_url = _env_or_none("OPENROUTER_BASE_URL") or (
+            "https://openrouter.ai/api/v1" if openrouter_api_key else None
+        )
         return cls(
             database_url=_default_db_url(),
-            openai_api_key=_env_or_none("OPENAI_API_KEY", "EMAILGENIUS_OPENAI_API_KEY"),
-            openai_base_url=_env_or_none("OPENAI_BASE_URL", "EMAILGENIUS_OPENAI_BASE_URL"),
+            openai_api_key=_env_or_none("OPENAI_API_KEY", "EMAILGENIUS_OPENAI_API_KEY", "OPENROUTER_API_KEY"),
+            openai_base_url=_env_or_none("OPENAI_BASE_URL", "EMAILGENIUS_OPENAI_BASE_URL", "OPENROUTER_BASE_URL")
+            or openrouter_base_url,
             openai_chat_model=os.getenv("EMAILGENIUS_OPENAI_CHAT_MODEL", "gpt-5"),
             openai_embedding_model=os.getenv(
                 "EMAILGENIUS_OPENAI_EMBED_MODEL",
@@ -67,6 +76,12 @@ class AppConfig:
             workspace_folder_id=_env_or_none("EMAILGENIUS_WORKSPACE_FOLDER_ID"),
             drive_poll_interval_seconds=poll_seconds,
             io_mode=io_mode,
+            exa_api_key=_env_or_none("EXA_API_KEY", "EMAILGENIUS_EXA_API_KEY"),
+            research_model=os.getenv("EMAILGENIUS_RESEARCH_MODEL", "deepseek/deepseek-chat-v3.1").strip()
+            or "deepseek/deepseek-chat-v3.1",
+            writer_model=os.getenv("EMAILGENIUS_WRITER_MODEL", "anthropic/claude-3.5-haiku").strip()
+            or "anthropic/claude-3.5-haiku",
+            writer_fallback_model=_env_or_none("EMAILGENIUS_WRITER_FALLBACK_MODEL"),
         )
 
 

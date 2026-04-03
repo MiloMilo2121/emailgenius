@@ -40,6 +40,15 @@ class SearchHit:
 
 
 @dataclass(slots=True)
+class ResearchSource:
+    title: str
+    url: str
+    snippet: str = ""
+    source_type: str = ""
+    published_at: str | None = None
+
+
+@dataclass(slots=True)
 class DiscoveryContext:
     site_query: str
     site_candidates: list[SearchHit] = field(default_factory=list)
@@ -77,6 +86,8 @@ class ParentProfile:
     sender_phone: str | None = None
     sender_booking_url: str | None = None
     outreach_seed_template: str = ""
+    instantly_intro_template: str = ""
+    instantly_cta_template: str = ""
 
 
 @dataclass(slots=True)
@@ -129,6 +140,31 @@ class DraftEmailVariant:
 
 
 @dataclass(slots=True)
+class ResearchDossier:
+    company_name: str
+    domain: str | None = None
+    company_summary: str = ""
+    trigger_event: str = ""
+    pain_hypothesis: str = ""
+    personalization_angle: str = ""
+    key_facts: list[str] = field(default_factory=list)
+    recent_news: list[ResearchSource] = field(default_factory=list)
+    citations: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+
+
+@dataclass(slots=True)
+class InstantlyDraft:
+    subject_line: str
+    personalization: str
+    intro_line: str
+    cta_line: str
+    body_template: str
+    confidence: float = 0.0
+    risk_flags: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ApprovalRecord:
     status: str
     reviewer: str | None = None
@@ -167,6 +203,8 @@ class CampaignCompanyResult:
     recommended_variant: str
     approval: ApprovalRecord
     sequence_result: SequenceResult | None = None
+    research_dossier: ResearchDossier | None = None
+    instantly_draft: InstantlyDraft | None = None
     risk_flags: list[str] = field(default_factory=list)
 
 

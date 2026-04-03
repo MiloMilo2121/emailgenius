@@ -11,7 +11,16 @@ from typing import Any
 
 from .guardrails import apply_claim_guard
 from .search import is_event_news_hit
-from .types import DraftEmailVariant, EnrichmentDossier, LeadCompany, LeadContact, ParentProfile
+from .types import (
+    DraftEmailVariant,
+    EnrichmentDossier,
+    InstantlyDraft,
+    LeadCompany,
+    LeadContact,
+    ParentProfile,
+    ResearchDossier,
+    ResearchSource,
+)
 
 try:
     from openai import OpenAI
@@ -163,16 +172,28 @@ class LLMGateway:
         fallback_api_key: str | None = None,
         fallback_chat_model: str | None = None,
         fallback_api_base_url: str | None = None,
+        research_model: str | None = None,
+        writer_model: str | None = None,
+        writer_fallback_model: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._chat_model = chat_model
         self._embedding_model = embedding_model
+        self._research_model = (research_model or chat_model).strip()
+        self._writer_model = (writer_model or chat_model).strip()
+        self._writer_fallback_model = (writer_fallback_model or fallback_chat_model or self._writer_model).strip()
         self._chat_timeout_s = 90.0
         self._embedding_timeout_s = 45.0
         self._embedding_client = self._build_client(api_key=api_key, base_url=api_base_url)
         self._chat_targets: list[tuple[Any, str]] = []
+        self._research_targets: list[tuple[Any, str]] = []
+        self._writer_targets: list[tuple[Any, str]] = []
         if self._embedding_client is not None:
-            self._chat_targets.append((self._embedding_client, chat_model))
+            self._chat_targets.append((self._embedding_client, self._writer_model))
+            self._research_targets.append((self._embedding_client, self._research_model))
+            self._writer_targets.append((self._embedding_client, self._writer_model))
+            if self._writer_fallback_model and self._writer_fallback_model != self._writer_model:
+                self._writer_targets.append((self._embedding_client, self._writer_fallback_model))
 
         resolved_fallback_model = (fallback_chat_model or chat_model).strip()
         fallback_client = self._build_client(api_key=fallback_api_key, base_url=fallback_api_base_url)
@@ -181,7 +202,9 @@ class LLMGateway:
             same_base_url = (api_base_url or "").strip() == (fallback_api_base_url or "").strip()
             same_model = resolved_fallback_model == chat_model
             if not (same_key and same_base_url and same_model):
-                self._chat_targets.append((fallback_client, resolved_fallback_model))
+                self._chat_targets.append((fallback_client, self._writer_fallback_model or resolved_fallback_model))
+                self._research_targets.append((fallback_client, self._research_model or resolved_fallback_model))
+                self._writer_targets.append((fallback_client, self._writer_fallback_model or resolved_fallback_model))
 
     def _build_client(self, *, api_key: str | None, base_url: str | None) -> Any | None:
         key = (api_key or "").strip()
@@ -492,10 +515,23 @@ class LLMGateway:
         )
 
     def _call_chat_json(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
-        if not self._chat_targets:
+        return self._call_chat_json_targets(
+            targets=self._chat_targets,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+
+    def _call_chat_json_targets(
+        self,
+        *,
+        targets: list[tuple[Any, str]],
+        system_prompt: str,
+        user_prompt: str,
+    ) -> dict[str, Any]:
+        if not targets:
             raise RuntimeError("LLM client unavailable")
         last_exc: Exception | None = None
-        for client, model in self._chat_targets:
+        for client, model in targets:
             try:
                 response = client.chat.completions.create(
                     model=model,
@@ -517,6 +553,156 @@ class LLMGateway:
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("LLM client unavailable")
+
+    def generate_research_dossier(
+        self,
+        *,
+        parent: ParentProfile,
+        company: LeadCompany,
+        contact: LeadContact | None,
+        research_bundle: dict[str, object],
+        llm_policy: str = "strict",
+    ) -> ResearchDossier:
+        if not self._research_targets:
+            if llm_policy == "strict":
+                raise RuntimeError("Research model unavailable: configure OPENROUTER_API_KEY or fallback provider")
+            return _fallback_research_dossier(company=company, research_bundle=research_bundle)
+
+        system_prompt = (
+            "Sei un analyst B2B. "
+            "Ricevi dati grezzi su un'azienda e devi restituire SOLO JSON valido. "
+            "Non inventare nulla. Usa solo fatti osservabili nei risultati. "
+            "Scegli un trigger concreto se esiste; altrimenti lascia trigger_event vuoto. "
+            "La personalizzazione deve essere utile per una cold email B2B italiana, non generica."
+        )
+        payload = {
+            "parent": {
+                "company_name": parent.company_name,
+                "tone": parent.tone,
+                "offer_catalog": parent.offer_catalog,
+                "proof_points": parent.proof_points,
+                "icp": parent.icp,
+            },
+            "company": asdict(company),
+            "contact": asdict(contact) if contact else None,
+            "research_bundle": research_bundle,
+            "output_schema": {
+                "company_summary": "string",
+                "trigger_event": "string",
+                "pain_hypothesis": "string",
+                "personalization_angle": "string",
+                "key_facts": ["string"],
+                "recent_news": [
+                    {
+                        "title": "string",
+                        "url": "string",
+                        "snippet": "string",
+                        "published_at": "string|null",
+                    }
+                ],
+                "citations": ["string"],
+                "confidence": "float 0..1",
+            },
+        }
+        try:
+            parsed = self._call_chat_json_targets(
+                targets=self._research_targets,
+                system_prompt=system_prompt,
+                user_prompt=json.dumps(payload, ensure_ascii=False),
+            )
+            return _research_dossier_from_payload(parsed, company=company, research_bundle=research_bundle)
+        except Exception as exc:
+            if llm_policy == "strict":
+                raise RuntimeError(f"Research dossier generation failed: {exc}") from exc
+            return _fallback_research_dossier(company=company, research_bundle=research_bundle)
+
+    def generate_instantly_draft(
+        self,
+        *,
+        parent: ParentProfile,
+        company: LeadCompany,
+        contact: LeadContact | None,
+        research_dossier: ResearchDossier,
+        llm_policy: str = "strict",
+    ) -> InstantlyDraft:
+        if not self._writer_targets:
+            if llm_policy == "strict":
+                raise RuntimeError("Writer model unavailable: configure OPENROUTER_API_KEY or fallback provider")
+            return _fallback_instantly_draft(parent=parent, company=company, contact=contact, research_dossier=research_dossier)
+
+        intro_line = format_email_body(
+            apply_template_replacements(
+                parent.instantly_intro_template or render_seed_template(parent, company, contact),
+                parent=parent,
+                company=company,
+                contact=contact,
+            )
+        )
+        cta_line = format_email_body(
+            apply_template_replacements(
+                parent.instantly_cta_template or parent.cta_policy,
+                parent=parent,
+                company=company,
+                contact=contact,
+            )
+        )
+
+        system_prompt = (
+            "Sei un copywriter B2B senior per cold email italiane. "
+            "Devi scrivere SOLO JSON valido con subject_line e personalization. "
+            "La personalization e' il blocco variabile centrale per Instantly: 2-4 frasi, concreta, credibile, no hype. "
+            "Non ripetere CTA o firma. Non inventare fatti. Se il trigger e' debole, resta sobrio."
+        )
+        payload = {
+            "parent": {
+                "company_name": parent.company_name,
+                "tone": parent.tone,
+                "offer_catalog": parent.offer_catalog,
+                "proof_points": parent.proof_points,
+                "no_go_claims": parent.no_go_claims,
+            },
+            "company": asdict(company),
+            "contact": asdict(contact) if contact else None,
+            "research_dossier": asdict(research_dossier),
+            "fixed_intro": intro_line,
+            "fixed_cta": cta_line,
+            "rules": {
+                "language": "italiano",
+                "subject_max_chars": 70,
+                "subject_max_words": 9,
+                "personalization_focus": [
+                    "trigger_event",
+                    "pain_hypothesis",
+                    "personalization_angle",
+                    "1-2 key facts massimo",
+                ],
+                "forbidden": [
+                    "claim assoluti",
+                    "garantito",
+                    "100%",
+                    "urgenza artificiale",
+                    "toni spam",
+                ],
+            },
+        }
+        try:
+            parsed = self._call_chat_json_targets(
+                targets=self._writer_targets,
+                system_prompt=system_prompt,
+                user_prompt=json.dumps(payload, ensure_ascii=False),
+            )
+            return _instantly_draft_from_payload(
+                parsed,
+                parent=parent,
+                company=company,
+                contact=contact,
+                intro_line=intro_line,
+                cta_line=cta_line,
+            )
+        except Exception as exc:
+            if llm_policy == "strict":
+                raise RuntimeError(f"Instantly draft generation failed: {exc}") from exc
+            return _fallback_instantly_draft(parent=parent, company=company, contact=contact, research_dossier=research_dossier)
 
     def _repair_variant(
         self,
@@ -761,6 +947,58 @@ def _fallback_subject(*, company: LeadCompany, contact: LeadContact | None) -> s
     return f"Opportunita concrete per {company.company_name}"
 
 
+def render_instantly_email(
+    parent: ParentProfile,
+    company: LeadCompany,
+    contact: LeadContact | None,
+    personalization: str,
+) -> str:
+    intro_line = format_email_body(
+        apply_template_replacements(
+            parent.instantly_intro_template or render_seed_template(parent, company, contact),
+            parent=parent,
+            company=company,
+            contact=contact,
+        )
+    )
+    cta_line = format_email_body(
+        apply_template_replacements(
+            parent.instantly_cta_template or parent.cta_policy,
+            parent=parent,
+            company=company,
+            contact=contact,
+        )
+    )
+    blocks = [intro_line.strip(), format_email_body(personalization or "").strip(), cta_line.strip()]
+    return format_email_body("\n\n".join(block for block in blocks if block))
+
+
+def render_instantly_body_template(
+    parent: ParentProfile,
+    company: LeadCompany,
+    contact: LeadContact | None,
+    personalization_placeholder: str = "{{Personalization}}",
+) -> str:
+    intro_line = format_email_body(
+        apply_template_replacements(
+            parent.instantly_intro_template or render_seed_template(parent, company, contact),
+            parent=parent,
+            company=company,
+            contact=contact,
+        )
+    )
+    cta_line = format_email_body(
+        apply_template_replacements(
+            parent.instantly_cta_template or parent.cta_policy,
+            parent=parent,
+            company=company,
+            contact=contact,
+        )
+    )
+    blocks = [intro_line.strip(), personalization_placeholder.strip(), cta_line.strip()]
+    return format_email_body("\n\n".join(block for block in blocks if block))
+
+
 def render_seed_template(parent: ParentProfile, company: LeadCompany, contact: LeadContact | None) -> str:
     template = parent.outreach_seed_template or ""
     rendered = apply_template_replacements(
@@ -781,6 +1019,225 @@ def _contact_first_name(contact: LeadContact | None) -> str:
     if not contact or not contact.full_name:
         return ""
     return contact.full_name.split()[0].strip()
+
+
+def _research_dossier_from_payload(
+    payload: dict[str, Any],
+    *,
+    company: LeadCompany,
+    research_bundle: dict[str, object],
+) -> ResearchDossier:
+    news_payload = payload.get("recent_news")
+    recent_news: list[ResearchSource] = []
+    if isinstance(news_payload, list):
+        for item in news_payload:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            url = str(item.get("url") or "").strip()
+            if not title or not url:
+                continue
+            recent_news.append(
+                ResearchSource(
+                    title=title,
+                    url=url,
+                    snippet=str(item.get("snippet") or "").strip(),
+                    source_type="news",
+                    published_at=str(item.get("published_at") or "").strip() or None,
+                )
+            )
+
+    if not recent_news:
+        recent_news = _research_sources_from_bundle(research_bundle, "news_results")
+
+    citations = payload.get("citations")
+    key_facts = payload.get("key_facts")
+    return ResearchDossier(
+        company_name=company.company_name,
+        domain=_domain_from_company(company),
+        company_summary=str(payload.get("company_summary") or "").strip(),
+        trigger_event=str(payload.get("trigger_event") or "").strip(),
+        pain_hypothesis=str(payload.get("pain_hypothesis") or "").strip(),
+        personalization_angle=str(payload.get("personalization_angle") or "").strip(),
+        key_facts=[str(item).strip() for item in key_facts if str(item).strip()] if isinstance(key_facts, list) else [],
+        recent_news=recent_news,
+        citations=[str(item).strip() for item in citations if str(item).strip()] if isinstance(citations, list) else [],
+        confidence=_clamp(float(payload.get("confidence") or 0.65)),
+    )
+
+
+def _fallback_research_dossier(
+    *,
+    company: LeadCompany,
+    research_bundle: dict[str, object],
+) -> ResearchDossier:
+    official_pages = _research_sources_from_bundle(research_bundle, "official_pages")
+    news_results = _research_sources_from_bundle(research_bundle, "news_results")
+    facts: list[str] = []
+    if company.industry:
+        facts.append(f"Settore: {company.industry}")
+    if company.location:
+        facts.append(f"Location: {company.location}")
+    if company.employee_count:
+        facts.append(f"Dimensione stimata: {company.employee_count} dipendenti")
+    if official_pages:
+        facts.append(f"Pagina rilevata: {official_pages[0].title}")
+    if news_results:
+        facts.append(f"Notizia recente: {news_results[0].title}")
+
+    trigger_event = news_results[0].title if news_results else ""
+    pain = "possibile bisogno di rendere piu' efficace il posizionamento commerciale su un momento aziendale concreto"
+    angle = facts[0] if facts else f"Azienda osservata: {company.company_name}"
+    citations = [item.url for item in (news_results[:2] + official_pages[:2])]
+    return ResearchDossier(
+        company_name=company.company_name,
+        domain=_domain_from_company(company),
+        company_summary=f"Profilo sintetico costruito da fonti esterne per {company.company_name}.",
+        trigger_event=trigger_event,
+        pain_hypothesis=pain,
+        personalization_angle=angle,
+        key_facts=facts[:5],
+        recent_news=news_results[:4],
+        citations=citations,
+        confidence=0.45,
+    )
+
+
+def _instantly_draft_from_payload(
+    payload: dict[str, Any],
+    *,
+    parent: ParentProfile,
+    company: LeadCompany,
+    contact: LeadContact | None,
+    intro_line: str,
+    cta_line: str,
+) -> InstantlyDraft:
+    subject_line = format_email_subject(
+        apply_template_replacements(
+            str(payload.get("subject_line") or _fallback_subject(company=company, contact=contact)),
+            parent=parent,
+            company=company,
+            contact=contact,
+        )
+    )
+    personalization = format_email_body(
+        apply_template_replacements(
+            str(payload.get("personalization") or "").strip(),
+            parent=parent,
+            company=company,
+            contact=contact,
+        )
+    )
+    if not personalization:
+        personalization = f"Ho notato {company.company_name} e credo abbia senso aprire un confronto concreto sul vostro contesto attuale."
+    full_body = render_instantly_email(parent, company, contact, personalization)
+    _, claim_flags = apply_claim_guard(
+        f"Oggetto: {subject_line}\n\n{full_body}",
+        parent.no_go_claims,
+    )
+    risk_flags = sorted(set(claim_flags + _instantly_quality_flags(subject=subject_line, personalization=personalization)))
+    return InstantlyDraft(
+        subject_line=subject_line,
+        personalization=personalization,
+        intro_line=intro_line,
+        cta_line=cta_line,
+        body_template=render_instantly_body_template(parent, company, contact),
+        confidence=_clamp(float(payload.get("confidence") or 0.7)),
+        risk_flags=risk_flags,
+    )
+
+
+def _fallback_instantly_draft(
+    *,
+    parent: ParentProfile,
+    company: LeadCompany,
+    contact: LeadContact | None,
+    research_dossier: ResearchDossier,
+) -> InstantlyDraft:
+    intro_line = format_email_body(
+        apply_template_replacements(
+            parent.instantly_intro_template or render_seed_template(parent, company, contact),
+            parent=parent,
+            company=company,
+            contact=contact,
+        )
+    )
+    cta_line = format_email_body(
+        apply_template_replacements(
+            parent.instantly_cta_template or parent.cta_policy,
+            parent=parent,
+            company=company,
+            contact=contact,
+        )
+    )
+    parts: list[str] = []
+    if research_dossier.trigger_event:
+        parts.append(f"Ho visto un segnale recente su {company.company_name}: {research_dossier.trigger_event}.")
+    if research_dossier.personalization_angle:
+        parts.append(research_dossier.personalization_angle)
+    elif research_dossier.pain_hypothesis:
+        parts.append(research_dossier.pain_hypothesis)
+    personalization = format_email_body(" ".join(parts).strip() or f"Mi sembra che su {company.company_name} abbia senso aprire un confronto concreto e molto mirato.")
+    subject_line = _fallback_subject(company=company, contact=contact)
+    risk_flags = _instantly_quality_flags(subject=subject_line, personalization=personalization)
+    return InstantlyDraft(
+        subject_line=subject_line,
+        personalization=personalization,
+        intro_line=intro_line,
+        cta_line=cta_line,
+        body_template=render_instantly_body_template(parent, company, contact),
+        confidence=0.52,
+        risk_flags=risk_flags,
+    )
+
+
+def _research_sources_from_bundle(research_bundle: dict[str, object], key: str) -> list[ResearchSource]:
+    section = research_bundle.get(key)
+    if not isinstance(section, dict):
+        return []
+    results = section.get("results")
+    if not isinstance(results, list):
+        return []
+    out: list[ResearchSource] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        if not title or not url:
+            continue
+        out.append(
+            ResearchSource(
+                title=title,
+                url=url,
+                snippet=str(item.get("snippet") or "").strip(),
+                source_type=str(item.get("source_type") or "").strip(),
+                published_at=str(item.get("published_at") or "").strip() or None,
+            )
+        )
+    return out
+
+
+def _domain_from_company(company: LeadCompany) -> str | None:
+    website = (company.website or "").strip()
+    if not website:
+        return None
+    match = re.match(r"^https?://([^/]+)", website, flags=re.IGNORECASE)
+    if not match:
+        return None
+    host = match.group(1).lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _instantly_quality_flags(*, subject: str, personalization: str) -> list[str]:
+    flags: list[str] = []
+    if len(subject.strip()) > 70:
+        flags.append("subject_too_long")
+    if personalization.count("!") > 1:
+        flags.append("spam_excessive_exclamation")
+    if len(personalization.strip()) > 900:
+        flags.append("personalization_too_long")
+    return sorted(set(flags))
 
 
 def _quality_gate_flags(

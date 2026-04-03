@@ -28,6 +28,17 @@ DEFAULT_OUTREACH_SEED_TEMPLATE = (
     "{{sender_company}}"
 )
 
+DEFAULT_INSTANTLY_INTRO_TEMPLATE = (
+    "Ciao {{first_name}},\n\n"
+    "scrivo perche' lavoriamo con aziende come {{company_name}} su progetti commerciali B2B molto mirati."
+)
+
+DEFAULT_INSTANTLY_CTA_TEMPLATE = (
+    "Se ha senso, posso mandarti 2 spunti concreti su come lo imposteremmo per voi.\n\n"
+    "{{sender_name}}\n"
+    "{{sender_company}}"
+)
+
 
 def load_parent_profile(profile_path: str | Path, *, slug_override: str | None = None) -> ParentProfile:
     path = Path(profile_path)
@@ -62,6 +73,8 @@ def build_parent_profile(payload: dict[str, object], *, slug_override: str | Non
         sender_phone=str(payload.get("sender_phone") or "").strip() or None,
         sender_booking_url=str(payload.get("sender_booking_url") or "").strip() or None,
         outreach_seed_template=str(payload.get("outreach_seed_template") or DEFAULT_OUTREACH_SEED_TEMPLATE).strip(),
+        instantly_intro_template=str(payload.get("instantly_intro_template") or DEFAULT_INSTANTLY_INTRO_TEMPLATE).strip(),
+        instantly_cta_template=str(payload.get("instantly_cta_template") or DEFAULT_INSTANTLY_CTA_TEMPLATE).strip(),
     )
 
     _validate_parent_profile(profile)
@@ -83,6 +96,10 @@ def _validate_parent_profile(profile: ParentProfile) -> None:
         raise ValueError("sender_name cannot be empty")
     if not profile.outreach_seed_template:
         raise ValueError("outreach_seed_template cannot be empty")
+    if not profile.instantly_intro_template:
+        raise ValueError("instantly_intro_template cannot be empty")
+    if not profile.instantly_cta_template:
+        raise ValueError("instantly_cta_template cannot be empty")
 
 
 def parent_profile_to_dict(profile: ParentProfile) -> dict[str, object]:
@@ -102,6 +119,8 @@ def parent_profile_to_dict(profile: ParentProfile) -> dict[str, object]:
         "sender_phone": profile.sender_phone,
         "sender_booking_url": profile.sender_booking_url,
         "outreach_seed_template": profile.outreach_seed_template,
+        "instantly_intro_template": profile.instantly_intro_template,
+        "instantly_cta_template": profile.instantly_cta_template,
     }
 
 
@@ -122,4 +141,6 @@ def parent_profile_from_dict(payload: dict[str, object]) -> ParentProfile:
         sender_phone=str(payload.get("sender_phone") or "").strip() or None,
         sender_booking_url=str(payload.get("sender_booking_url") or "").strip() or None,
         outreach_seed_template=str(payload.get("outreach_seed_template") or DEFAULT_OUTREACH_SEED_TEMPLATE).strip(),
+        instantly_intro_template=str(payload.get("instantly_intro_template") or DEFAULT_INSTANTLY_INTRO_TEMPLATE).strip(),
+        instantly_cta_template=str(payload.get("instantly_cta_template") or DEFAULT_INSTANTLY_CTA_TEMPLATE).strip(),
     )

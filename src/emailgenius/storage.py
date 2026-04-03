@@ -401,6 +401,8 @@ class PostgresStore:
             "variants": [asdict(item) for item in result.variants],
             "recommended_variant": result.recommended_variant,
             "sequence_result": asdict(result.sequence_result) if result.sequence_result else None,
+            "research_dossier": asdict(result.research_dossier) if result.research_dossier else None,
+            "instantly_draft": asdict(result.instantly_draft) if result.instantly_draft else None,
             "approval": asdict(result.approval),
             "risk_flags": result.risk_flags,
             "created_at": utc_now_iso(),

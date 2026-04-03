@@ -14,6 +14,7 @@ Direzione consigliata:
 - `App-first`: lavori sempre dalla UI.
 - `PostgreSQL locale`: salva parent, knowledge, campagne e output.
 - `Google Drive`: opzionale, solo se vuoi import/export o collaborazione Workspace.
+- `Exa + OpenRouter`: stack consigliato per ricerca low-cost + scrittura personalizzata.
 
 Non serve Supabase per questa fase: l'app usa gia `PostgreSQL` come source of truth e puo` vivere interamente in locale.
 
@@ -60,11 +61,17 @@ playwright install chromium
 export EMAILGENIUS_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/emailgenius"
 export OPENAI_API_KEY="..."                              # provider primario (OpenAI-compatible)
 export OPENAI_BASE_URL="https://open.bigmodel.cn/api/paas/v4/"
+export OPENROUTER_API_KEY="..."                         # consigliato per routing multi-modello low-cost
+export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+export EXA_API_KEY="..."                                # consigliato per research aziendale/news
 export EMAILGENIUS_OPENAI_CHAT_MODEL="glm-4.7-flashx"
 export EMAILGENIUS_OPENAI_EMBED_MODEL="hash-local"      # embedding locale gratuito
 export EMAILGENIUS_OPENAI_FALLBACK_API_KEY="..."        # opzionale provider secondario
 export EMAILGENIUS_OPENAI_FALLBACK_BASE_URL="https://api.deepseek.com"
 export EMAILGENIUS_OPENAI_FALLBACK_CHAT_MODEL="deepseek-chat"
+export EMAILGENIUS_RESEARCH_MODEL="deepseek/deepseek-chat-v3.1"
+export EMAILGENIUS_WRITER_MODEL="anthropic/claude-3.5-haiku"
+export EMAILGENIUS_WRITER_FALLBACK_MODEL="anthropic/claude-sonnet-4.5"
 export GOOGLE_SERVICE_ACCOUNT_JSON="/absolute/path/service-account.json"
 export EMAILGENIUS_RETENTION_DAYS="90"
 export EMAILGENIUS_WORKSPACE_FOLDER_ID="<GOOGLE_DRIVE_FOLDER_ID>"
@@ -75,6 +82,18 @@ export EMAILGENIUS_IO_MODE="local"
 `OPENAI_BASE_URL`/`EMAILGENIUS_OPENAI_BASE_URL` permette di usare endpoint OpenAI-compatible
 (es. Z.AI, DeepSeek, Kimi). Se il provider primario fallisce, `EMAILGENIUS_OPENAI_FALLBACK_*`
 viene usato come backup.
+
+Stack consigliato per il flusso UI-first:
+- `EXA_API_KEY` per recuperare dati e news aziendali
+- `OPENROUTER_API_KEY` per orchestrare:
+  - modello research economico (`EMAILGENIUS_RESEARCH_MODEL`)
+  - modello writer (`EMAILGENIUS_WRITER_MODEL`)
+
+Con questa configurazione la UI genera:
+- dossier JSON aziendale
+- subject line
+- blocco `Personalization` per Instantly
+- CSV pronto per Instantly
 
 `EMAILGENIUS_HOME` default: `.emailgenius/`
 
@@ -133,6 +152,7 @@ La UI copre:
 - creazione e attivazione parent profile senza scrivere YAML a mano,
 - upload knowledge per parent,
 - lancio campagne locali da CSV,
+- export CSV Instantly-ready con `SubjectLine` e `Personalization`,
 - sync Drive-native dal workspace,
 - monitoraggio job e campagne recenti.
 

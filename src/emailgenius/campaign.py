@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from .agents import CampaignAgentEngine
 from .config import AppConfig
 from .enrichment import build_enrichment_dossier_sync, run_nebula_enrichment_machine
+from .exa import ExaClient
 from .gdrive import (
     DriveLeadRow,
     build_workspace_clients,
@@ -26,10 +27,24 @@ from .leads import (
     select_primary_contact,
     build_company_and_contacts,
 )
-from .llm import LLMGateway, format_email_body, format_email_subject, render_seed_template
+from .llm import (
+    LLMGateway,
+    format_email_body,
+    format_email_subject,
+    render_instantly_email,
+    render_seed_template,
+)
 from .sheets import approval_columns, publish_campaign_to_sheets
 from .storage import PostgresStore
-from .types import ApprovalRecord, CampaignCompanyResult, CampaignSummary, DraftEmailVariant, EnrichmentDossier, SequenceResult
+from .types import (
+    ApprovalRecord,
+    CampaignCompanyResult,
+    CampaignSummary,
+    DraftEmailVariant,
+    EnrichmentDossier,
+    SearchHit,
+    SequenceResult,
+)
 from .utils import utc_now_iso, write_csv
 
 
@@ -142,6 +157,7 @@ def run_campaign(
         enrichment_mode=enrichment_mode,
     )
     rag_enabled = bool(config.openai_api_key)
+    research_client = ExaClient(config.exa_api_key)
     memory_snippets = _load_email_memory_snippets(store=store, parent_slug=parent_slug, limit=12)
 
     campaign_id = store.create_campaign(parent_slug=parent_slug, leads_file=leads_csv_path, sheet_id=sheet_id)
@@ -172,6 +188,7 @@ def run_campaign(
             backoff_base_seconds=backoff_base_seconds,
             output_schema=output_schema,
             memory_snippets=memory_snippets,
+            research_client=research_client,
         )
         by_row_index = {item.row_index: item for item in outcomes}
         for row in preflight.rows:
@@ -225,6 +242,7 @@ def run_campaign(
                 backoff_base_seconds=backoff_base_seconds,
                 output_schema=output_schema,
                 memory_snippets=memory_snippets,
+                research_client=research_client,
             )
             if outcome.fatal_error:
                 raise RuntimeError(outcome.error_message or "Fatal campaign error")
@@ -771,6 +789,8 @@ def export_campaign(store: PostgresStore, campaign_id: str, output_path: str, ou
 
         generation_status = "OK" if passing else ("FAILED_COPY_GUARD" if by_name else str(payload.get("generation_status") or "OK"))
         error_code = "" if passing else ("FAILED_COPY_GUARD" if by_name else str(payload.get("error_code") or ""))
+        instantly_payload = payload.get("instantly_draft") if isinstance(payload, dict) else None
+        research_payload = payload.get("research_dossier") if isinstance(payload, dict) else None
 
         warning_parts: list[str] = []
         existing_warning = str(payload.get("generation_warning") or "") if isinstance(payload, dict) else ""
@@ -810,6 +830,17 @@ def export_campaign(store: PostgresStore, campaign_id: str, output_path: str, ou
                 "generation_status": generation_status,
                 "generation_warning": generation_warning,
                 "error_code": error_code,
+                "SubjectLine": str((instantly_payload or {}).get("subject_line") or final_subject),
+                "Personalization": str((instantly_payload or {}).get("personalization") or ""),
+                "CTA": str((instantly_payload or {}).get("cta_line") or ""),
+                "BodyTemplate": str((instantly_payload or {}).get("body_template") or ""),
+                "Angle": str((research_payload or {}).get("personalization_angle") or ""),
+                "Trigger": str((research_payload or {}).get("trigger_event") or ""),
+                "Source1": (
+                    str((research_payload or {}).get("citations", [""])[0] or "")
+                    if isinstance((research_payload or {}).get("citations"), list)
+                    else ""
+                ),
                 "evidence_summary": "; ".join((payload.get("dossier", {}) or {}).get("evidence", [])[:5])
                 if isinstance(payload, dict)
                 else "",
@@ -823,6 +854,67 @@ def export_campaign(store: PostgresStore, campaign_id: str, output_path: str, ou
         rows.append(row)
 
     columns = _merge_columns(raw_columns, approval_cols)
+    target = Path(output_path)
+    write_csv(target, rows, columns)
+    return target
+
+
+def export_instantly_campaign(store: PostgresStore, campaign_id: str, output_path: str) -> Path:
+    records = store.list_campaign_records(campaign_id)
+    rows: list[dict[str, object]] = []
+    columns = [
+        "Email",
+        "FirstName",
+        "LastName",
+        "CompanyName",
+        "SubjectLine",
+        "Personalization",
+        "CampaignId",
+        "ParentSlug",
+    ]
+
+    for record in records:
+        payload = record.get("payload_json") or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        instantly_payload = payload.get("instantly_draft") if isinstance(payload.get("instantly_draft"), dict) else {}
+        raw_row = payload.get("raw_row") if isinstance(payload.get("raw_row"), dict) else {}
+        email = str(record.get("contact_email") or raw_row.get("Email") or raw_row.get("email") or "").strip()
+        if not email:
+            continue
+        contact_name = str(record.get("contact_name") or raw_row.get("Full Name") or "").strip()
+        if not contact_name:
+            contact_name = (
+                f"{raw_row.get('First Name', '')} {raw_row.get('Last Name', '')}".strip()
+                if isinstance(raw_row, dict)
+                else ""
+            )
+        first_name, last_name = _split_contact_name(contact_name)
+        subject_line = str(
+            instantly_payload.get("subject_line")
+            or payload.get("SubjectLine")
+            or payload.get("final_subject")
+            or ""
+        ).strip()
+        personalization = str(
+            instantly_payload.get("personalization")
+            or payload.get("Personalization")
+            or ""
+        ).strip()
+
+        rows.append(
+            {
+                "Email": email,
+                "FirstName": first_name,
+                "LastName": last_name,
+                "CompanyName": str(record.get("company_name") or "").strip(),
+                "SubjectLine": subject_line,
+                "Personalization": personalization,
+                "CampaignId": campaign_id,
+                "ParentSlug": str(record.get("parent_slug") or "").strip(),
+            }
+        )
+
     target = Path(output_path)
     write_csv(target, rows, columns)
     return target
@@ -847,6 +939,7 @@ def _run_row_mode(
     backoff_base_seconds: float,
     output_schema: str,
     memory_snippets: list[str],
+    research_client: ExaClient,
 ) -> list[_RowOutcome]:
     valid_rows = [item for item in preflight.rows if item.is_valid]
     if not valid_rows:
@@ -874,11 +967,12 @@ def _run_row_mode(
                 headless=headless,
                 recipient_mode=recipient_mode,
                 max_retries=max_retries,
-                backoff_base_seconds=backoff_base_seconds,
-                output_schema=output_schema,
-                memory_snippets=memory_snippets,
-                row_index=item.row_index,
-            )
+                    backoff_base_seconds=backoff_base_seconds,
+                    output_schema=output_schema,
+                    memory_snippets=memory_snippets,
+                    row_index=item.row_index,
+                    research_client=research_client,
+                )
             for item in valid_rows
         ]
         for future in as_completed(futures):
@@ -913,6 +1007,7 @@ def _process_company_like_item(
     backoff_base_seconds: float,
     output_schema: str,
     memory_snippets: list[str],
+    research_client: ExaClient,
     row_index: int = 0,
 ) -> _RowOutcome:
     company, contacts = build_company_and_contacts(canonical_rows)
@@ -926,6 +1021,22 @@ def _process_company_like_item(
     global_flags: list[str] = []
     enrichment_flags: list[str] = []
     nebula_payload: dict[str, object] = {}
+
+    if research_client.configured:
+        return _process_company_with_instantly_pipeline(
+            campaign_id=campaign_id,
+            parent_slug=parent_slug,
+            parent=parent,
+            company=company,
+            primary_contact=primary_contact,
+            raw_row=raw_row,
+            store=store,
+            llm=llm,
+            llm_policy=llm_policy,
+            output_schema=output_schema,
+            research_client=research_client,
+            row_index=row_index,
+        )
 
     if not company.website:
         # If the lead has no website, do not waste tokens or attempt web enrichment: use the seed template as-is.
@@ -1168,6 +1279,133 @@ def _process_company_like_item(
     )
 
 
+def _process_company_with_instantly_pipeline(
+    *,
+    campaign_id: str,
+    parent_slug: str,
+    parent,
+    company,
+    primary_contact,
+    raw_row: dict[str, str],
+    store: PostgresStore,
+    llm: LLMGateway,
+    llm_policy: str,
+    output_schema: str,
+    research_client: ExaClient,
+    row_index: int,
+) -> _RowOutcome:
+    try:
+        research_bundle = research_client.collect_company_research(
+            company=company,
+            contact=primary_contact,
+        )
+        research_dossier = llm.generate_research_dossier(
+            parent=parent,
+            company=company,
+            contact=primary_contact,
+            research_bundle=research_bundle,
+            llm_policy=llm_policy,
+        )
+        instantly_draft = llm.generate_instantly_draft(
+            parent=parent,
+            company=company,
+            contact=primary_contact,
+            research_dossier=research_dossier,
+            llm_policy=llm_policy,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        return _RowOutcome(
+            row_index=row_index,
+            export_row=_error_row(
+                campaign_id=campaign_id,
+                parent_slug=parent_slug,
+                raw_row=raw_row,
+                error_code="FAILED_RESEARCH_PIPELINE",
+                warning_message=message,
+                output_schema=output_schema,
+            ),
+            result=None,
+            extra_payload={
+                "used_llm": True,
+                "template_only": False,
+                "research_mode": "exa_openrouter",
+            },
+            warning=True,
+            failed=True,
+            fatal_error=(llm_policy == "strict"),
+            error_message=message,
+        )
+
+    final_subject = instantly_draft.subject_line
+    final_body = render_instantly_email(
+        parent,
+        company,
+        primary_contact,
+        instantly_draft.personalization,
+    )
+    variant = DraftEmailVariant(
+        variant="A",
+        subject=final_subject,
+        body=final_body,
+        cta=parent.cta_policy,
+        risk_flags=list(instantly_draft.risk_flags),
+        confidence=instantly_draft.confidence,
+    )
+    generation_status = "OK"
+    citations = list(research_dossier.citations or [])
+    row_flags = set(instantly_draft.risk_flags)
+    if not citations:
+        row_flags.add("limited_sources")
+    result = CampaignCompanyResult(
+        campaign_id=campaign_id,
+        parent_slug=parent_slug,
+        company=company,
+        contact=primary_contact,
+        dossier=_research_dossier_to_enrichment_dossier(research_dossier),
+        variants=[variant],
+        recommended_variant="A",
+        approval=ApprovalRecord(status="PENDING", updated_at=utc_now_iso()),
+        research_dossier=research_dossier,
+        instantly_draft=instantly_draft,
+        risk_flags=sorted(row_flags),
+    )
+    export_row = _company_result_to_row(
+        result=result,
+        raw_row=raw_row,
+        selected_variant="A",
+        final_subject=final_subject,
+        final_body=final_body,
+        generation_status=generation_status,
+        generation_warning="",
+        error_code="",
+        output_schema=output_schema,
+    )
+    extra_payload = {
+        "selected_variant": "A",
+        "final_subject": final_subject,
+        "final_body": final_body,
+        "generation_status": generation_status,
+        "generation_warning": "",
+        "error_code": "",
+        "used_llm": True,
+        "template_only": False,
+        "raw_row": raw_row,
+        "research_mode": "exa_openrouter",
+        "research_bundle": research_bundle,
+    }
+    return _RowOutcome(
+        row_index=row_index,
+        export_row=export_row,
+        result=result,
+        extra_payload=extra_payload,
+        warning=bool(row_flags),
+        failed=False,
+        fatal_error=False,
+        error_message=None,
+    )
+
+
 def _resolve_enrichment_mode(*, recipient_mode: str, enrichment_mode: str) -> str:
     mode = enrichment_mode.lower()
     if mode == "auto":
@@ -1343,6 +1581,21 @@ def _minimal_dossier(*, company_name: str) -> EnrichmentDossier:
     )
 
 
+def _research_dossier_to_enrichment_dossier(research_dossier) -> EnrichmentDossier:
+    return EnrichmentDossier(
+        site_summary=research_dossier.company_summary or f"Dossier sintetico per {research_dossier.company_name}.",
+        news_items=[
+            SearchHit(title=item.title, url=item.url, snippet=item.snippet)
+            for item in research_dossier.recent_news
+        ],
+        linkedin_public_summary="",
+        pain_hypotheses=[research_dossier.pain_hypothesis] if research_dossier.pain_hypothesis else [],
+        opportunity_hypotheses=[research_dossier.personalization_angle] if research_dossier.personalization_angle else [],
+        evidence=list(research_dossier.key_facts or []),
+        sources=list(research_dossier.citations or []),
+    )
+
+
 def _template_only_subject(*, company, contact) -> str:
     first_name = ""
     if contact and getattr(contact, "full_name", ""):
@@ -1374,6 +1627,15 @@ def _pick_raw_row_for_company(preflight_rows, company_row: dict[str, str]) -> di
         if (item.row.get("Company Name") or "").strip().lower() == company_name:
             return item.raw_row
     return {}
+
+
+def _split_contact_name(value: str) -> tuple[str, str]:
+    parts = [item for item in str(value or "").split() if item]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
 
 
 def _order_rows_like_input(export_rows: list[dict[str, object]], preflight_rows) -> list[dict[str, object]]:
@@ -1427,6 +1689,13 @@ def _skipped_validation_row(
             "generation_status": "SKIPPED_VALIDATION",
             "generation_warning": warning,
             "error_code": "SKIPPED_VALIDATION",
+            "SubjectLine": "",
+            "Personalization": "",
+            "CTA": "",
+            "BodyTemplate": "",
+            "Angle": "",
+            "Trigger": "",
+            "Source1": "",
             "status": "PENDING",
             "updated_at": utc_now_iso(),
         }
@@ -1465,6 +1734,13 @@ def _error_row(
             "generation_status": "ERROR",
             "generation_warning": warning_message[:240],
             "error_code": error_code,
+            "SubjectLine": "",
+            "Personalization": "",
+            "CTA": "",
+            "BodyTemplate": "",
+            "Angle": "",
+            "Trigger": "",
+            "Source1": "",
             "status": "PENDING",
             "updated_at": utc_now_iso(),
         }
@@ -1489,6 +1765,8 @@ def _company_result_to_row(
 ) -> dict[str, object]:
     variants = _variants_by_name(result.variants)
     evidence_summary = "; ".join(result.dossier.evidence[:5])
+    instantly_draft = result.instantly_draft
+    research_dossier = result.research_dossier
     row = dict(raw_row)
     row.update(
         {
@@ -1511,6 +1789,13 @@ def _company_result_to_row(
             "error_code": error_code,
             "evidence_summary": evidence_summary,
             "risk_flags": "; ".join(result.risk_flags),
+            "SubjectLine": instantly_draft.subject_line if instantly_draft else final_subject,
+            "Personalization": instantly_draft.personalization if instantly_draft else "",
+            "CTA": instantly_draft.cta_line if instantly_draft else "",
+            "BodyTemplate": instantly_draft.body_template if instantly_draft else "",
+            "Angle": research_dossier.personalization_angle if research_dossier else "",
+            "Trigger": research_dossier.trigger_event if research_dossier else "",
+            "Source1": (research_dossier.citations[0] if research_dossier and research_dossier.citations else ""),
             "status": result.approval.status,
             "reviewer_notes": result.approval.notes or "",
             "approved_variant": result.approval.approved_variant or "",

@@ -24,6 +24,10 @@
         <strong>{{ "configurato" if config_summary.llm_configured else "mancante" }}</strong>
       </div>
       <div class="metric">
+        <span>Research</span>
+        <strong>{{ "configurato" if config_summary.research_configured else "mancante" }}</strong>
+      </div>
+      <div class="metric">
         <span>Google</span>
         <strong>{{ "configurato" if config_summary.google_configured else "mancante" }}</strong>
       </div>
@@ -128,6 +132,14 @@
         <label class="full">
           <span>Seed template</span>
           <textarea name="outreach_seed_template" rows="7">{{ profile_defaults.outreach_seed_template }}</textarea>
+        </label>
+        <label class="full">
+          <span>Instantly intro</span>
+          <textarea name="instantly_intro_template" rows="4">{{ profile_defaults.instantly_intro_template }}</textarea>
+        </label>
+        <label class="full">
+          <span>Instantly CTA</span>
+          <textarea name="instantly_cta_template" rows="4">{{ profile_defaults.instantly_cta_template }}</textarea>
         </label>
         <label class="checkbox">
           <input type="checkbox" name="set_active" value="1">

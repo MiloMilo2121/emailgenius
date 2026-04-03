@@ -19,7 +19,7 @@ from fastapi.templating import Jinja2Templates
 from .campaign import campaign_status, run_campaign
 from .config import AppConfig, app_home
 from .knowledge import ingest_knowledge_file
-from .llm import LLMGateway
+from .llm import LLMGateway, render_instantly_body_template
 from .storage import PostgresStore
 from .types import ParentProfile
 from .utils import slugify
@@ -125,6 +125,8 @@ def create_app(
         sender_phone: str = Form(""),
         sender_booking_url: str = Form(""),
         outreach_seed_template: str = Form(""),
+        instantly_intro_template: str = Form(""),
+        instantly_cta_template: str = Form(""),
         set_active: str = Form(""),
     ) -> Response:
         try:
@@ -144,6 +146,8 @@ def create_app(
                 sender_phone=sender_phone,
                 sender_booking_url=sender_booking_url,
                 outreach_seed_template=outreach_seed_template,
+                instantly_intro_template=instantly_intro_template,
+                instantly_cta_template=instantly_cta_template,
             )
             _get_store(request).upsert_parent_profile(profile, set_active=bool(set_active))
         except Exception as exc:
@@ -163,6 +167,8 @@ def create_app(
                 sender_phone=sender_phone,
                 sender_booking_url=sender_booking_url,
                 outreach_seed_template=outreach_seed_template,
+                instantly_intro_template=instantly_intro_template,
+                instantly_cta_template=instantly_cta_template,
             )
             return _templates(request).TemplateResponse(
                 request,
@@ -571,6 +577,9 @@ def _llm_from_config(config: AppConfig) -> LLMGateway:
         fallback_api_key=config.openai_fallback_api_key,
         fallback_api_base_url=config.openai_fallback_base_url,
         fallback_chat_model=config.openai_fallback_chat_model,
+        research_model=config.research_model,
+        writer_model=config.writer_model,
+        writer_fallback_model=config.writer_fallback_model,
     )
 
 
@@ -603,6 +612,7 @@ def _config_summary(config: AppConfig) -> dict[str, object]:
         "database_target": database_target,
         "workspace_folder_id": config.workspace_folder_id or "",
         "llm_configured": bool(config.openai_api_key or config.openai_fallback_api_key),
+        "research_configured": bool(config.exa_api_key),
         "google_configured": bool(config.google_service_account_json),
     }
 
@@ -619,6 +629,15 @@ def _profile_defaults() -> dict[str, str]:
             "Ciao {{first_name}},\n\n"
             "scrivo per condividere una valutazione preliminare utile per {{company_name}}.\n\n"
             "Se vuoi, possiamo sentirci 20-30 minuti per capire se ci sono margini reali di miglioramento.\n\n"
+            "{{sender_name}}\n"
+            "{{sender_company}}"
+        ),
+        "instantly_intro_template": (
+            "Ciao {{first_name}},\n\n"
+            "scrivo perche' lavoriamo con aziende come {{company_name}} su outreach B2B molto mirato."
+        ),
+        "instantly_cta_template": (
+            "Se ha senso, posso mandarti 2 spunti concreti su come lo imposteremmo per voi.\n\n"
             "{{sender_name}}\n"
             "{{sender_company}}"
         ),
@@ -642,10 +661,13 @@ def _parent_profile_from_form(
     sender_phone: str,
     sender_booking_url: str,
     outreach_seed_template: str,
+    instantly_intro_template: str,
+    instantly_cta_template: str,
 ) -> ParentProfile:
     resolved_slug = slugify(slug or company_name)
     if not resolved_slug:
         raise ValueError("Slug o company name obbligatori.")
+    defaults = _profile_defaults()
     profile = ParentProfile(
         slug=resolved_slug,
         company_name=company_name.strip(),
@@ -661,7 +683,9 @@ def _parent_profile_from_form(
         sender_company=sender_company.strip() or None,
         sender_phone=sender_phone.strip() or None,
         sender_booking_url=sender_booking_url.strip() or None,
-        outreach_seed_template=outreach_seed_template.strip(),
+        outreach_seed_template=outreach_seed_template.strip() or defaults["outreach_seed_template"],
+        instantly_intro_template=instantly_intro_template.strip() or defaults["instantly_intro_template"],
+        instantly_cta_template=instantly_cta_template.strip() or defaults["instantly_cta_template"],
     )
     if not profile.company_name:
         raise ValueError("Company name obbligatorio.")
@@ -677,6 +701,10 @@ def _parent_profile_from_form(
         raise ValueError("Sender name obbligatorio.")
     if not profile.outreach_seed_template:
         raise ValueError("Seed template obbligatorio.")
+    if not profile.instantly_intro_template:
+        raise ValueError("Instantly intro obbligatoria.")
+    if not profile.instantly_cta_template:
+        raise ValueError("Instantly CTA obbligatoria.")
     return profile
 
 
@@ -700,6 +728,8 @@ def _safe_parent_from_partial_form(**kwargs: str) -> ParentProfile:
             sender_phone=kwargs.get("sender_phone") or None,
             sender_booking_url=kwargs.get("sender_booking_url") or None,
             outreach_seed_template=kwargs.get("outreach_seed_template") or "",
+            instantly_intro_template=kwargs.get("instantly_intro_template") or "",
+            instantly_cta_template=kwargs.get("instantly_cta_template") or "",
         )
 
 
@@ -711,6 +741,8 @@ def _campaign_record_view(record: dict[str, object]) -> dict[str, object]:
         **record,
         "final_subject": str(payload.get("final_subject") or ""),
         "final_body": str(payload.get("final_body") or ""),
+        "instantly_subject": str(((payload.get("instantly_draft") or {}) if isinstance(payload, dict) else {}).get("subject_line") or payload.get("SubjectLine") or ""),
+        "instantly_personalization": str(((payload.get("instantly_draft") or {}) if isinstance(payload, dict) else {}).get("personalization") or payload.get("Personalization") or ""),
     }
 
 
@@ -769,12 +801,16 @@ def _build_instantly_export_rows(
             str(record.get("company_name") or ""),
             str((company or {}).get("company_name") or ""),
         )
+        instantly_payload = payload.get("instantly_draft")
+        if not isinstance(instantly_payload, dict):
+            instantly_payload = {}
         first_step_subject = ""
         if sequence_steps:
             first_step = sequence_steps[0]
             if isinstance(first_step, dict):
                 first_step_subject = str(first_step.get("subject") or "").strip()
         subject_line = _first_non_empty(
+            str(instantly_payload.get("subject_line") or ""),
             str(payload.get("final_subject") or ""),
             str(payload.get("recommended_subject") or ""),
             first_step_subject,
@@ -783,6 +819,8 @@ def _build_instantly_export_rows(
             company_name=company_name,
             payload=payload,
         )
+        if instantly_payload.get("personalization"):
+            personalization = str(instantly_payload.get("personalization") or "").strip()
 
         rows.append(
             {
@@ -801,6 +839,11 @@ def _build_instantly_export_rows(
 
 
 def _build_personalization_snippet(*, company_name: str, payload: dict[str, object]) -> str:
+    instantly_payload = payload.get("instantly_draft")
+    if isinstance(instantly_payload, dict):
+        text = str(instantly_payload.get("personalization") or "").strip()
+        if text:
+            return text
     sequence_result = payload.get("sequence_result")
     if isinstance(sequence_result, dict):
         trigger_facts = sequence_result.get("trigger_facts")
@@ -843,6 +886,8 @@ def _build_personalization_snippet(*, company_name: str, payload: dict[str, obje
 
 
 def _instantly_template_body(parent: ParentProfile | None) -> str:
+    if parent:
+        return render_instantly_body_template(parent, _preview_company(parent), None)
     sender_name = (parent.sender_name if parent else "") or "Team EmailGenius"
     sender_company = (parent.sender_company if parent and parent.sender_company else (parent.company_name if parent else ""))
     return INSTANTLY_TEMPLATE_BODY.replace("{{SenderName}}", sender_name).replace("{{SenderCompany}}", sender_company)
@@ -871,6 +916,23 @@ def _first_non_empty(*values: str) -> str:
         if text:
             return text
     return ""
+
+
+def _preview_company(parent: ParentProfile):
+    from .types import LeadCompany
+
+    return LeadCompany(
+        company_key=parent.slug,
+        company_name="{{CompanyName}}",
+        website=None,
+        linkedin_company=None,
+        industry=None,
+        employee_count=None,
+        location=None,
+        keywords=None,
+        tech=None,
+        founded_year=None,
+    )
 
 
 def _resolve_ui_parent_slug(store: PostgresStore) -> str:
