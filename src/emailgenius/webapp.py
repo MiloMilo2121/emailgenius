@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .campaign import campaign_status, run_campaign
+from .campaign import run_campaign
 from .config import AppConfig, app_home
 from .knowledge import ingest_knowledge_file
 from .llm import LLMGateway, render_instantly_body_template
@@ -743,15 +743,14 @@ def _safe_parent_from_partial_form(**kwargs: str) -> ParentProfile:
 
 
 def _campaign_record_view(record: dict[str, object]) -> dict[str, object]:
-    payload = record.get("payload_json")
-    if not isinstance(payload, dict):
-        payload = {}
+    payload = _payload_json(record)
+    instantly_draft = _instantly_draft_payload(payload)
     return {
         **record,
         "final_subject": str(payload.get("final_subject") or ""),
         "final_body": str(payload.get("final_body") or ""),
-        "instantly_subject": str(((payload.get("instantly_draft") or {}) if isinstance(payload, dict) else {}).get("subject_line") or payload.get("SubjectLine") or ""),
-        "instantly_personalization": str(((payload.get("instantly_draft") or {}) if isinstance(payload, dict) else {}).get("personalization") or payload.get("Personalization") or ""),
+        "instantly_subject": str(instantly_draft.get("subject_line") or payload.get("SubjectLine") or ""),
+        "instantly_personalization": str(instantly_draft.get("personalization") or payload.get("Personalization") or ""),
     }
 
 
@@ -784,9 +783,7 @@ def _build_instantly_export_rows(
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for record in records:
-        payload = record.get("payload_json")
-        if not isinstance(payload, dict):
-            payload = {}
+        payload = _payload_json(record)
         contact_payload = payload.get("contact")
         company_payload = payload.get("company")
         dossier_payload = payload.get("dossier")
@@ -810,9 +807,7 @@ def _build_instantly_export_rows(
             str(record.get("company_name") or ""),
             str((company or {}).get("company_name") or ""),
         )
-        instantly_payload = payload.get("instantly_draft")
-        if not isinstance(instantly_payload, dict):
-            instantly_payload = {}
+        instantly_payload = _instantly_draft_payload(payload)
         first_step_subject = ""
         if sequence_steps:
             first_step = sequence_steps[0]
@@ -848,11 +843,10 @@ def _build_instantly_export_rows(
 
 
 def _build_personalization_snippet(*, company_name: str, payload: dict[str, object]) -> str:
-    instantly_payload = payload.get("instantly_draft")
-    if isinstance(instantly_payload, dict):
-        text = str(instantly_payload.get("personalization") or "").strip()
-        if text:
-            return text
+    instantly_payload = _instantly_draft_payload(payload)
+    text = str(instantly_payload.get("personalization") or "").strip()
+    if text:
+        return text
     sequence_result = payload.get("sequence_result")
     if isinstance(sequence_result, dict):
         trigger_facts = sequence_result.get("trigger_facts")
@@ -942,6 +936,16 @@ def _preview_company(parent: ParentProfile):
         tech=None,
         founded_year=None,
     )
+
+
+def _payload_json(record: dict[str, object]) -> dict[str, object]:
+    payload = record.get("payload_json")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _instantly_draft_payload(payload: dict[str, object]) -> dict[str, object]:
+    instantly_payload = payload.get("instantly_draft")
+    return instantly_payload if isinstance(instantly_payload, dict) else {}
 
 
 def _resolve_ui_parent_slug(store: PostgresStore) -> str:
