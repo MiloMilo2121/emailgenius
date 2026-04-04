@@ -360,7 +360,7 @@ class LLMGateway:
                 for index, item in enumerate(variants_raw):
                     variant_name = str(item.get("variant") or requested_variants[min(index, len(requested_variants) - 1)]).upper()
                     subject_raw = str(item.get("subject") or _fallback_subject(company=company, contact=contact))
-                    body_raw = str(item.get("body") or _render_seed_template(parent, company, contact))
+                    body_raw = str(item.get("body") or render_seed_template(parent, company, contact))
                     subject = format_email_subject(
                         apply_template_replacements(
                             subject_raw,
@@ -877,7 +877,7 @@ def _fallback_variants(
     variant_names: list[str],
     rewrite_targets: dict[str, tuple[float, float]],
 ) -> tuple[list[DraftEmailVariant], str, list[str]]:
-    rendered = _render_seed_template(parent, company, contact)
+    rendered = render_seed_template(parent, company, contact)
     insight_block = _render_insight_block(company, dossier)
     rendered_with_insights = (
         f"{rendered}\n\n{insight_block}".strip() if insight_block else rendered
@@ -1009,11 +1009,6 @@ def render_seed_template(parent: ParentProfile, company: LeadCompany, contact: L
         contact=contact,
     )
     return rendered.strip()
-
-
-def _render_seed_template(parent: ParentProfile, company: LeadCompany, contact: LeadContact | None) -> str:
-    # Back-compat internal name used across the codebase.
-    return render_seed_template(parent, company, contact)
 
 
 def _contact_first_name(contact: LeadContact | None) -> str:

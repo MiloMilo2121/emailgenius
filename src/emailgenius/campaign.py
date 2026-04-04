@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from .agents import CampaignAgentEngine
 from .config import AppConfig
 from .enrichment import build_enrichment_dossier_sync, run_nebula_enrichment_machine
-from .exa import ExaClient
+from .exa import ExaClient, _normalize_research_sources as _normalize_exa_research_sources
 from .gdrive import (
     DriveLeadRow,
     build_workspace_clients,
@@ -37,13 +37,12 @@ from .llm import (
 from .sheets import approval_columns, publish_campaign_to_sheets
 from .storage import PostgresStore
 from .types import (
-    ALLOWED_RESEARCH_SOURCES,
-    DEFAULT_RESEARCH_SOURCES,
     ApprovalRecord,
     CampaignCompanyResult,
     CampaignSummary,
     DraftEmailVariant,
     EnrichmentDossier,
+    DEFAULT_RESEARCH_SOURCES,
     SearchHit,
     SequenceResult,
 )
@@ -92,7 +91,10 @@ def run_campaign(
     research_sources: list[str] | None = None,
 ) -> tuple[CampaignSummary, Path, list[dict[str, object]]]:
     resolved_io_mode = (io_mode or "local").strip().lower()
-    selected_research_sources = _normalize_research_sources(research_sources)
+    selected_research_sources = _normalize_exa_research_sources(
+        research_sources,
+        default_to=list(DEFAULT_RESEARCH_SOURCES),
+    )
     if resolved_io_mode not in {"local", "drive"}:
         raise ValueError("io_mode must be one of: local, drive")
 
@@ -1445,22 +1447,6 @@ def _resolve_enrichment_mode(*, recipient_mode: str, enrichment_mode: str) -> st
     return mode
 
 
-def _normalize_research_sources(value: list[str] | None) -> list[str]:
-    if value is None:
-        raw_items = list(DEFAULT_RESEARCH_SOURCES)
-    else:
-        raw_items = list(value)
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for item in raw_items:
-        source = str(item or "").strip().lower()
-        if source not in ALLOWED_RESEARCH_SOURCES or source in seen:
-            continue
-        seen.add(source)
-        normalized.append(source)
-    return normalized
-
-
 def _resolve_export_schema(*, output_schema: str, summary: dict[str, object]) -> str:
     mode = output_schema.lower()
     if mode in {"ab", "abc"}:
@@ -1471,6 +1457,7 @@ def _resolve_export_schema(*, output_schema: str, summary: dict[str, object]) ->
         if maybe in {"ab", "abc"}:
             return maybe
     return "ab"
+
 
 def _row_has_valid_website(row: dict[str, str]) -> bool:
     website = (row.get("Company Website Full") or "").strip()
