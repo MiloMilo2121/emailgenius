@@ -57,6 +57,7 @@ async def build_enrichment_dossier(
     city = _guess_city(company.location)
     news_items: list[SearchHit] = []
     sources: list[str] = []
+    selected_site_snippet = ""
 
     if not website:
         _, _, discovered_news, _, selected_site = discover_company_and_news(
@@ -69,11 +70,15 @@ async def build_enrichment_dossier(
         news_items.extend(discovered_news)
         if selected_site:
             sources.append(selected_site.url)
+            selected_site_snippet = " ".join(str(selected_site.snippet or "").split()).strip()
 
     site_summary = ""
     evidence: list[str] = []
     pain_hypotheses = _infer_pains(company)
     opportunity_hypotheses = _infer_opportunities(company)
+    if selected_site_snippet:
+        site_summary = selected_site_snippet[:900]
+        evidence.append("Utilizzato estratto testuale da Search API come base")
 
     if website:
         try:
@@ -82,7 +87,11 @@ async def build_enrichment_dossier(
                 headless=headless,
                 timeout_ms=snapshot_timeout_ms,
             )
-            site_summary = snapshot.text_excerpt[:1200]
+            site_summary = _merge_site_summary(
+                site_summary,
+                snapshot.text_excerpt[:1200],
+                max_chars=2200,
+            )
             sources.append(snapshot.url)
             evidence.append(f"Homepage title: {snapshot.title}")
 
@@ -96,8 +105,11 @@ async def build_enrichment_dossier(
                     )
                     sources.append(extra_snapshot.url)
                     evidence.append(f"Pagina rilevata: {extra_snapshot.title}")
-                    if len(site_summary) < 2200:
-                        site_summary += "\n" + extra_snapshot.text_excerpt[:500]
+                    site_summary = _merge_site_summary(
+                        site_summary,
+                        extra_snapshot.text_excerpt[:500],
+                        max_chars=2200,
+                    )
                 except Exception:
                     continue
         except Exception:
@@ -213,6 +225,21 @@ def _pick_informative_links(links: list[str], *, base_url: str, limit: int) -> l
             break
 
     return picked
+
+
+def _merge_site_summary(base: str, extra: str, *, max_chars: int) -> str:
+    base_clean = " ".join((base or "").split()).strip()
+    extra_clean = " ".join((extra or "").split()).strip()
+    if not extra_clean:
+        return base_clean[:max_chars]
+    if not base_clean:
+        return extra_clean[:max_chars]
+    if extra_clean in base_clean:
+        return base_clean[:max_chars]
+    if base_clean in extra_clean:
+        return extra_clean[:max_chars]
+    merged = f"{base_clean}\n{extra_clean}"
+    return merged[:max_chars]
 
 
 def _linkedin_summary(company: LeadCompany, contact: LeadContact | None) -> str:
