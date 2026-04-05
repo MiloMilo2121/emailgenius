@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
@@ -18,8 +20,13 @@ async def fetch_website_snapshot(
     headless: bool = True,
 ) -> BrowserSnapshot:
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless)
-        context = await browser.new_context()
+        remote_browser_ws_url = os.getenv("REMOTE_BROWSER_WS_URL")
+        if remote_browser_ws_url:
+            browser = await playwright.chromium.connect_over_cdp(os.environ["REMOTE_BROWSER_WS_URL"])
+            context = browser.contexts[0] if browser.contexts else await browser.new_context()
+        else:
+            browser = await playwright.chromium.launch(headless=headless)
+            context = await browser.new_context()
         page = await context.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
