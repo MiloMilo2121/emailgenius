@@ -8,6 +8,7 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
 from .profiles import parent_profile_from_dict, parent_profile_to_dict
 from .types import CampaignCompanyResult, CampaignSummary, ParentProfile
@@ -710,3 +711,15 @@ def _vector_literal(values: list[float] | None) -> str | None:
     if not values:
         return None
     return "[" + ",".join(f"{float(value):.8f}" for value in values) + "]"
+
+
+class AsyncPostgresStore:
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self.pool = pool
+
+    async def test_connection(self) -> bool:
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
+                await cur.fetchone()
+        return True

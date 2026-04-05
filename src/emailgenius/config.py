@@ -28,6 +28,8 @@ class AppConfig:
     database_url: str
     openai_api_key: str | None
     openai_base_url: str | None
+    tavily_api_key: str | None
+    remote_browser_ws_url: str | None
     openai_chat_model: str
     openai_embedding_model: str
     google_service_account_json: str | None
@@ -63,6 +65,8 @@ class AppConfig:
             openai_api_key=_env_or_none("OPENAI_API_KEY", "EMAILGENIUS_OPENAI_API_KEY", "OPENROUTER_API_KEY"),
             openai_base_url=_env_or_none("OPENAI_BASE_URL", "EMAILGENIUS_OPENAI_BASE_URL", "OPENROUTER_BASE_URL")
             or openrouter_base_url,
+            tavily_api_key=_env_or_none("TAVILY_API_KEY"),
+            remote_browser_ws_url=_env_or_none("REMOTE_BROWSER_WS_URL"),
             openai_chat_model=os.getenv("EMAILGENIUS_OPENAI_CHAT_MODEL", "gpt-5"),
             openai_embedding_model=os.getenv(
                 "EMAILGENIUS_OPENAI_EMBED_MODEL",
