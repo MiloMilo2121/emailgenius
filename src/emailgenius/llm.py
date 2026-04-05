@@ -9,6 +9,8 @@ from dataclasses import asdict
 from difflib import SequenceMatcher
 from typing import Any
 
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from .guardrails import apply_claim_guard
 from .search import is_event_news_hit
 from .types import (
@@ -220,6 +222,26 @@ class LLMGateway:
             kwargs["base_url"] = resolved_base_url
         return OpenAI(**kwargs)
 
+    @retry(wait=wait_exponential(min=1, max=10), stop=stop_after_attempt(3), reraise=True)
+    def _call_embeddings_api(self, *, client: Any, model: str, texts: list[str]) -> Any:
+        return client.embeddings.create(
+            model=model,
+            input=texts,
+            timeout=self._embedding_timeout_s,
+        )
+
+    @retry(wait=wait_exponential(min=1, max=10), stop=stop_after_attempt(3), reraise=True)
+    def _call_chat_api(self, *, client: Any, model: str, system_prompt: str, user_prompt: str) -> Any:
+        return client.chat.completions.create(
+            model=model,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            timeout=self._chat_timeout_s,
+        )
+
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
@@ -231,10 +253,10 @@ class LLMGateway:
             return [_hash_embedding(text) for text in texts]
 
         try:
-            response = self._embedding_client.embeddings.create(
+            response = self._call_embeddings_api(
+                client=self._embedding_client,
                 model=embed_model,
-                input=texts,
-                timeout=self._embedding_timeout_s,
+                texts=texts,
             )
             return [item.embedding for item in response.data]
         except Exception:
@@ -533,14 +555,11 @@ class LLMGateway:
         last_exc: Exception | None = None
         for client, model in targets:
             try:
-                response = client.chat.completions.create(
+                response = self._call_chat_api(
+                    client=client,
                     model=model,
-                    response_format={"type": "json_object"},
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    timeout=self._chat_timeout_s,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
                 )
                 raw_content = response.choices[0].message.content or "{}"
                 parsed = json.loads(raw_content)
