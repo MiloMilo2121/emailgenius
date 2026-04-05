@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 from urllib.parse import urlparse
 
+from duckduckgo_search import DDGS
 from tavily import TavilyClient
 from .types import SearchHit
 
 DEFAULT_TIMEOUT_S = 15
+logger = logging.getLogger(__name__)
 
 BLOCKED_OFFICIAL_SITE_DOMAINS = {
     "linkedin.com",
@@ -101,13 +104,9 @@ def _get_tavily_client() -> TavilyClient:
     return TavilyClient(api_key=api_key)
 
 
-def _search_with_tavily(query: str, *, max_results: int) -> list[SearchHit]:
-    client = _get_tavily_client()
-    payload = client.search(query=query, max_results=max_results, search_depth="basic")
-    raw_results = payload.get("results")
+def _map_tavily_hits(raw_results: object, *, max_results: int) -> list[SearchHit]:
     if not isinstance(raw_results, list):
         return []
-
     hits: list[SearchHit] = []
     seen: set[str] = set()
     for item in raw_results:
@@ -125,9 +124,40 @@ def _search_with_tavily(query: str, *, max_results: int) -> list[SearchHit]:
     return hits
 
 
+def _map_ddg_hits(raw_results: object, *, max_results: int) -> list[SearchHit]:
+    if not isinstance(raw_results, list):
+        return []
+    hits: list[SearchHit] = []
+    seen: set[str] = set()
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or item.get("href") or "").strip()
+        snippet = str(item.get("body") or item.get("content") or item.get("snippet") or "").strip()
+        if not title or not url or not url.startswith(("http://", "https://")) or url in seen:
+            continue
+        seen.add(url)
+        hits.append(SearchHit(title=title, url=url, snippet=snippet))
+        if len(hits) >= max_results:
+            break
+    return hits
+
+
 def search_news_web(query: str, *, max_results: int = 8, timeout_s: int = DEFAULT_TIMEOUT_S) -> list[SearchHit]:
     del timeout_s
-    hits = _search_with_tavily(query, max_results=max_results)
+    try:
+        client = _get_tavily_client()
+        payload = client.search(query=query, max_results=max_results, search_depth="basic")
+        hits = _map_tavily_hits(payload.get("results"), max_results=max_results)
+    except Exception:
+        logger.warning("Tavily failed, falling back to DDG for news search...", exc_info=True)
+        try:
+            hits = _map_ddg_hits(list(DDGS().news(query, max_results=max_results)), max_results=max_results)
+        except Exception:
+            logger.warning("DDG news fallback failed for query: %s", query, exc_info=True)
+            hits = []
+
     filtered: list[SearchHit] = []
     for hit in hits:
         host = _domain(hit.url)
@@ -139,7 +169,17 @@ def search_news_web(query: str, *, max_results: int = 8, timeout_s: int = DEFAUL
 
 def search_web(query: str, *, max_results: int = 8, timeout_s: int = DEFAULT_TIMEOUT_S) -> list[SearchHit]:
     del timeout_s
-    return _search_with_tavily(query, max_results=max_results)
+    try:
+        client = _get_tavily_client()
+        payload = client.search(query=query, max_results=max_results, search_depth="basic")
+        return _map_tavily_hits(payload.get("results"), max_results=max_results)
+    except Exception:
+        logger.warning("Tavily failed, falling back to DDG for web search...", exc_info=True)
+        try:
+            return _map_ddg_hits(list(DDGS().text(query, max_results=max_results)), max_results=max_results)
+        except Exception:
+            logger.warning("DDG web fallback failed for query: %s", query, exc_info=True)
+            return []
 
 
 def build_site_query(company_name: str, city: str | None = None) -> str:

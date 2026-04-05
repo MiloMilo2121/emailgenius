@@ -48,6 +48,37 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0], SearchHit(title="Acme S.p.A. - Sito Ufficiale", url="https://www.acme.it", snippet="Produzione meccanica per automazione industriale"))
 
+    @patch.dict("os.environ", {"TAVILY_API_KEY": "test-key"}, clear=False)
+    @patch("emailgenius.search.DDGS")
+    @patch("emailgenius.search.TavilyClient")
+    def test_search_web_falls_back_to_ddg_when_tavily_fails(self, mock_tavily_client, mock_ddgs) -> None:
+        mock_client = mock_tavily_client.return_value
+        mock_client.search.side_effect = Exception("tavily outage")
+
+        mock_ddgs_instance = mock_ddgs.return_value
+        mock_ddgs_instance.text.return_value = [
+            {
+                "title": "Acme fallback result",
+                "href": "https://fallback.example.com/acme",
+                "body": "Fallback snippet from DDG",
+            }
+        ]
+
+        hits = search_web("Acme Vicenza sito ufficiale", max_results=5)
+
+        mock_tavily_client.assert_called_once_with(api_key="test-key")
+        mock_client.search.assert_called_once_with(
+            query="Acme Vicenza sito ufficiale",
+            max_results=5,
+            search_depth="basic",
+        )
+        mock_ddgs.assert_called_once_with()
+        mock_ddgs_instance.text.assert_called_once_with("Acme Vicenza sito ufficiale", max_results=5)
+        self.assertEqual(
+            hits,
+            [SearchHit(title="Acme fallback result", url="https://fallback.example.com/acme", snippet="Fallback snippet from DDG")],
+        )
+
     def test_is_event_news_hit_detects_event_keywords(self) -> None:
         event_hit = SearchHit(title="Acme investe in un nuovo impianto", url="https://news.example.com/acme-impianto")
         neutral_hit = SearchHit(title="Acme aggiorna il sito corporate", url="https://news.example.com/acme-sito")
