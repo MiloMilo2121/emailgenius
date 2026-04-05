@@ -1,17 +1,12 @@
 from __future__ import annotations
 
-import base64
-import html as html_lib
+import os
 import re
-from html.parser import HTMLParser
-from urllib.parse import parse_qs, unquote, urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
 
+from tavily import TavilyClient
 from .types import SearchHit
 
-DUCKDUCKGO_HTML_URL = "https://duckduckgo.com/html/"
-BING_SEARCH_URL = "https://www.bing.com/search"
-BING_NEWS_SEARCH_URL = "https://www.bing.com/news/search"
 DEFAULT_TIMEOUT_S = 15
 
 BLOCKED_OFFICIAL_SITE_DOMAINS = {
@@ -81,51 +76,6 @@ EVENT_NEWS_KEYWORDS = (
 )
 
 
-class _DuckDuckGoResultParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self._in_result_anchor = False
-        self._current_href: str | None = None
-        self._current_text_parts: list[str] = []
-        self._hits: list[SearchHit] = []
-
-    @property
-    def hits(self) -> list[SearchHit]:
-        return self._hits
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag != "a":
-            return
-
-        attr_map = {key: (value or "") for key, value in attrs}
-        css_class = attr_map.get("class", "")
-        href = attr_map.get("href", "")
-        if "result__a" not in css_class or not href:
-            return
-
-        self._in_result_anchor = True
-        self._current_href = href
-        self._current_text_parts = []
-
-    def handle_data(self, data: str) -> None:
-        if self._in_result_anchor:
-            self._current_text_parts.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag != "a" or not self._in_result_anchor:
-            return
-
-        title = " ".join("".join(self._current_text_parts).split())
-        url = _resolve_ddg_url(self._current_href or "")
-
-        if title and url:
-            self._hits.append(SearchHit(title=title, url=url))
-
-        self._in_result_anchor = False
-        self._current_href = None
-        self._current_text_parts = []
-
-
 def _tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]{3,}", text.lower())
 
@@ -144,192 +94,52 @@ def normalize_homepage_url(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}/"
 
 
-def _resolve_ddg_url(raw_href: str) -> str:
-    if not raw_href:
-        return ""
-
-    href = raw_href.strip()
-    if href.startswith("//"):
-        href = f"https:{href}"
-
-    parsed = urlparse(href)
-    if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
-        target = parse_qs(parsed.query).get("uddg", [""])[0]
-        return unquote(target)
-
-    return href if parsed.scheme in {"http", "https"} else ""
+def _get_tavily_client() -> TavilyClient:
+    api_key = (os.getenv("TAVILY_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("TAVILY_API_KEY is required to perform web search")
+    return TavilyClient(api_key=api_key)
 
 
-def parse_duckduckgo_html(html: str, *, max_results: int = 8) -> list[SearchHit]:
-    parser = _DuckDuckGoResultParser()
-    parser.feed(html)
+def _search_with_tavily(query: str, *, max_results: int) -> list[SearchHit]:
+    client = _get_tavily_client()
+    payload = client.search(query=query, max_results=max_results, search_depth="basic")
+    raw_results = payload.get("results")
+    if not isinstance(raw_results, list):
+        return []
 
-    seen: set[str] = set()
-    hits: list[SearchHit] = []
-
-    for hit in parser.hits:
-        url = hit.url.strip()
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        hits.append(hit)
-        if len(hits) >= max_results:
-            break
-
-    return hits
-
-
-def _strip_tags(value: str) -> str:
-    return re.sub(r"<[^>]+>", "", value)
-
-
-def _decode_bing_redirect(raw_href: str) -> str:
-    href = html_lib.unescape(raw_href.strip())
-    if href.startswith("//"):
-        href = f"https:{href}"
-
-    parsed = urlparse(href)
-    if not parsed.netloc.endswith("bing.com") or not parsed.path.startswith("/ck/a"):
-        return href if parsed.scheme in {"http", "https"} else ""
-
-    encoded = parse_qs(parsed.query).get("u", [""])[0]
-    if not encoded:
-        return href
-
-    # Bing often prefixes base64 payload with "a1".
-    if encoded.startswith("a1"):
-        encoded = encoded[2:]
-
-    padding = "=" * (-len(encoded) % 4)
-    try:
-        decoded = base64.urlsafe_b64decode(f"{encoded}{padding}").decode("utf-8", errors="ignore")
-    except Exception:
-        return href
-
-    return decoded if decoded.startswith(("http://", "https://")) else href
-
-
-def parse_bing_html(html: str, *, max_results: int = 8) -> list[SearchHit]:
-    pattern = re.compile(
-        r"<h2[^>]*>\s*<a[^>]*href=\"(?P<href>[^\"]+)\"[^>]*>(?P<title>.*?)</a>\s*</h2>",
-        flags=re.IGNORECASE | re.DOTALL,
-    )
     hits: list[SearchHit] = []
     seen: set[str] = set()
-
-    for match in pattern.finditer(html):
-        url = _decode_bing_redirect(match.group("href"))
-        title_html = match.group("title")
-        title = " ".join(_strip_tags(html_lib.unescape(title_html)).split())
-        if not title or not url or url in seen:
+    for item in raw_results:
+        if not isinstance(item, dict):
             continue
-
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        snippet = str(item.get("content") or "").strip()
+        if not title or not url or not url.startswith(("http://", "https://")) or url in seen:
+            continue
         seen.add(url)
-        hits.append(SearchHit(title=title, url=url))
+        hits.append(SearchHit(title=title, url=url, snippet=snippet))
         if len(hits) >= max_results:
             break
-
     return hits
-
-
-def parse_bing_news_html(html: str, *, max_results: int = 8) -> list[SearchHit]:
-    pattern = re.compile(
-        r"<a[^>]*class=\"title\"[^>]*href=\"(?P<href>[^\"]+)\"[^>]*>(?P<title>.*?)</a>",
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    hits: list[SearchHit] = []
-    seen: set[str] = set()
-
-    for match in pattern.finditer(html):
-        url = html_lib.unescape(match.group("href")).strip()
-        title_html = match.group("title")
-        title = " ".join(_strip_tags(html_lib.unescape(title_html)).split())
-        if not title or not url or url in seen:
-            continue
-        if not url.startswith(("http://", "https://")):
-            continue
-
-        seen.add(url)
-        hits.append(SearchHit(title=title, url=url))
-        if len(hits) >= max_results:
-            break
-
-    return hits
-
-
-def _search_bing(query: str, *, max_results: int, timeout_s: int) -> list[SearchHit]:
-    url = f"{BING_SEARCH_URL}?{urlencode({'q': query, 'setlang': 'it'})}"
-    header_candidates: tuple[dict[str, str], ...] = (
-        {"User-Agent": "Mozilla/5.0"},
-        {},
-    )
-
-    for headers in header_candidates:
-        request = Request(url, headers=headers, method="GET")
-        try:
-            with urlopen(request, timeout=timeout_s) as response:
-                html = response.read().decode("utf-8", errors="ignore")
-        except Exception:
-            continue
-
-        hits = parse_bing_html(html, max_results=max_results)
-        if hits:
-            return hits
-
-    return []
 
 
 def search_news_web(query: str, *, max_results: int = 8, timeout_s: int = DEFAULT_TIMEOUT_S) -> list[SearchHit]:
-    url = f"{BING_NEWS_SEARCH_URL}?{urlencode({'q': query, 'setlang': 'it'})}"
-    header_candidates: tuple[dict[str, str], ...] = (
-        {"User-Agent": "Mozilla/5.0"},
-        {},
-    )
-
-    for headers in header_candidates:
-        request = Request(url, headers=headers, method="GET")
-        try:
-            with urlopen(request, timeout=timeout_s) as response:
-                html = response.read().decode("utf-8", errors="ignore")
-        except Exception:
+    del timeout_s
+    hits = _search_with_tavily(query, max_results=max_results)
+    filtered: list[SearchHit] = []
+    for hit in hits:
+        host = _domain(hit.url)
+        if any(host == blocked or host.endswith(f".{blocked}") for blocked in BLOCKED_OFFICIAL_SITE_DOMAINS):
             continue
-
-        hits = parse_bing_news_html(html, max_results=max_results)
-        if hits:
-            return hits
-
-    # Fallback to generic web search when the news vertical fails.
-    return search_web(query, max_results=max_results, timeout_s=timeout_s)
+        filtered.append(hit)
+    return filtered
 
 
 def search_web(query: str, *, max_results: int = 8, timeout_s: int = DEFAULT_TIMEOUT_S) -> list[SearchHit]:
-    # Bing first: more reliable in this runtime than DDG HTML endpoint.
-    bing_hits = _search_bing(query, max_results=max_results, timeout_s=timeout_s)
-    if bing_hits:
-        return bing_hits
-
-    payload = urlencode({"q": query, "kl": "it-it"}).encode("utf-8")
-    request = Request(
-        DUCKDUCKGO_HTML_URL,
-        data=payload,
-        headers={
-            "User-Agent": "Mozilla/5.0",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-        method="POST",
-    )
-
-    try:
-        with urlopen(request, timeout=timeout_s) as response:
-            html = response.read().decode("utf-8", errors="ignore")
-        ddg_hits = parse_duckduckgo_html(html, max_results=max_results)
-    except Exception:
-        ddg_hits = []
-
-    if ddg_hits:
-        return ddg_hits
-
-    return _search_bing(query, max_results=max_results, timeout_s=timeout_s)
+    del timeout_s
+    return _search_with_tavily(query, max_results=max_results)
 
 
 def build_site_query(company_name: str, city: str | None = None) -> str:

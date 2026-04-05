@@ -1,13 +1,12 @@
 import unittest
+from unittest.mock import patch
 
 from emailgenius.search import (
     build_company_news_queries,
     build_news_query,
     build_site_query,
     is_event_news_hit,
-    parse_bing_html,
-    parse_bing_news_html,
-    parse_duckduckgo_html,
+    search_web,
     select_official_site,
 )
 from emailgenius.types import SearchHit
@@ -24,46 +23,30 @@ class SearchTests(unittest.TestCase):
         self.assertIn("investimenti fiere partnership", queries[0])
         self.assertTrue(any(query.startswith("site:acme.it") for query in queries))
 
-    def test_parse_duckduckgo_results(self) -> None:
-        html = """
-        <html><body>
-          <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.acme.it">Acme S.p.A.</a>
-          <a class="result__a" href="https://www.linkedin.com/company/acme">Acme LinkedIn</a>
-        </body></html>
-        """
-        hits = parse_duckduckgo_html(html, max_results=5)
+    @patch.dict("os.environ", {"TAVILY_API_KEY": "test-key"}, clear=False)
+    @patch("emailgenius.search.TavilyClient")
+    def test_search_web_uses_tavily_and_maps_hits(self, mock_tavily_client) -> None:
+        mock_client = mock_tavily_client.return_value
+        mock_client.search.return_value = {
+            "results": [
+                {
+                    "title": "Acme S.p.A. - Sito Ufficiale",
+                    "url": "https://www.acme.it",
+                    "content": "Produzione meccanica per automazione industriale",
+                }
+            ]
+        }
 
-        self.assertEqual(len(hits), 2)
-        self.assertEqual(hits[0].url, "https://www.acme.it")
-        self.assertEqual(hits[0].title, "Acme S.p.A.")
+        hits = search_web("Acme Vicenza sito ufficiale", max_results=5)
 
-    def test_parse_bing_results(self) -> None:
-        html = """
-        <html><body>
-          <li class="b_algo">
-            <h2><a href="https://www.bing.com/ck/a?u=a1aHR0cHM6Ly93d3cuYWNtZS5pdA">Acme S.p.A. - Sito Ufficiale</a></h2>
-          </li>
-          <li class="b_algo">
-            <h2><a href="https://www.bing.com/ck/a?u=a1aHR0cHM6Ly93d3cubGlua2VkaW4uY29tL2NvbXBhbnkvYWNtZQ">Acme | LinkedIn</a></h2>
-          </li>
-        </body></html>
-        """
-        hits = parse_bing_html(html, max_results=5)
-        self.assertEqual(len(hits), 2)
-        self.assertEqual(hits[0].url, "https://www.acme.it")
-        self.assertEqual(hits[0].title, "Acme S.p.A. - Sito Ufficiale")
-
-    def test_parse_bing_news_results(self) -> None:
-        html = """
-        <html><body>
-          <a target="_blank" class="title" href="https://news.example.com/acme-ricavi"><h2>Acme ricavi record nel 2026</h2></a>
-          <a target="_blank" class="title" href="https://another.example.com/acme-efficienza"><h2>Acme investe in efficienza energetica</h2></a>
-        </body></html>
-        """
-        hits = parse_bing_news_html(html, max_results=5)
-        self.assertEqual(len(hits), 2)
-        self.assertEqual(hits[0].url, "https://news.example.com/acme-ricavi")
-        self.assertEqual(hits[0].title, "Acme ricavi record nel 2026")
+        mock_tavily_client.assert_called_once_with(api_key="test-key")
+        mock_client.search.assert_called_once_with(
+            query="Acme Vicenza sito ufficiale",
+            max_results=5,
+            search_depth="basic",
+        )
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0], SearchHit(title="Acme S.p.A. - Sito Ufficiale", url="https://www.acme.it", snippet="Produzione meccanica per automazione industriale"))
 
     def test_is_event_news_hit_detects_event_keywords(self) -> None:
         event_hit = SearchHit(title="Acme investe in un nuovo impianto", url="https://news.example.com/acme-impianto")
