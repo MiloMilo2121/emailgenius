@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .campaign import run_campaign
+from .campaign import run_campaign_legacy
 from .config import AppConfig, app_home
 from .knowledge import ingest_knowledge_file
 from .llm import LLMGateway, render_instantly_body_template
@@ -505,7 +505,7 @@ def _run_local_campaign_job(
     force_cost_override: bool,
     research_sources: list[str],
 ) -> tuple[str | None, str | None]:
-    summary, export_path, _ = run_campaign(
+    summary, export_path, _ = run_campaign_legacy(
         config=config,
         store=app.state.store_factory(),
         llm=app.state.llm_factory(),
@@ -544,7 +544,7 @@ def _run_workspace_sync_job(
     cost_cap_eur: float,
     force_cost_override: bool,
 ) -> tuple[str | None, str | None]:
-    summary, export_path, _ = run_campaign(
+    summary, export_path, _ = run_campaign_legacy(
         config=config,
         store=app.state.store_factory(),
         llm=app.state.llm_factory(),

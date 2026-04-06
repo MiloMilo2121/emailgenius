@@ -36,9 +36,19 @@ async def node_generate_copy(state: CompanyState, config: Any) -> dict:
     dossier = state.get("dossier")
     
     variants = []
-    # Example logic bridging to existing generation
-    if llm and dossier:
-        # In agent engine this uses engine.generate_sequence, for now returning empty variants
-        pass
-        
+    from ..agents import CampaignAgentEngine
+    if llm and parent and dossier:
+        engine = CampaignAgentEngine(llm=llm)
+        seq_result = await asyncio.to_thread(
+            engine.generate_sequence,
+            parent=parent,
+            company=company,
+            contact=contact,
+            dossier=dossier,
+            marketing_snippets=dossier.evidence if hasattr(dossier, "evidence") else [],
+            llm_policy=config.get("configurable", {}).get("llm_policy", "strict")
+        )
+        if seq_result and hasattr(seq_result, "steps"):
+            variants = seq_result.steps
+
     return {"variants": variants}

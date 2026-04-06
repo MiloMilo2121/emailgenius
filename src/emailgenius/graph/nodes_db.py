@@ -28,11 +28,7 @@ async def node_persist_record(state: CompanyState, config: Any) -> dict:
         )
         
         if store:
-            if hasattr(store, "insert_campaign_company_result_async"):
-                await store.insert_campaign_company_result_async(result)
-            else:
-                # dummy fallback for typing
-                pass
+            await store.insert_campaign_company_result(result)
                 
     return {}
 
