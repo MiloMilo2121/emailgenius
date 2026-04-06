@@ -243,7 +243,27 @@ def _persist_json(payload: dict, output_path: Path) -> None:
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# Heavy internal store methods abstracted out
+def _store(config: AppConfig):
+    from .storage import PostgresStore
+    if not config.database_url:
+        raise RuntimeError("DATABASE_URL non configurato")
+    return PostgresStore(config.database_url)
+
+def _llm(config: AppConfig):
+    from .llm import LLMGateway
+    if not config.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY non configurato")
+    return LLMGateway(config.openai_api_key)
+def _run_workspace_sync_once(*, config, store, llm, slug, workspace_folder_id, out_dir, gsheets_auth, headless, llm_policy) -> int:
+    from .campaign import run_campaign
+    run_campaign(
+        config=config, store=store, llm=llm, parent_slug=slug, leads_csv_path=None, out_dir=out_dir,
+        sheet_id=None, io_mode="drive", workspace_folder_id=workspace_folder_id, gsheets_auth=gsheets_auth,
+        stages="all", headless=headless, recipient_mode="row", variant_mode="ab", output_schema="ab",
+        llm_policy=llm_policy, enrichment_mode="auto", max_concurrency=1, max_retries=3,
+        backoff_base_seconds=1.0, cost_cap_eur=50.0, force_cost_override=False, research_sources=["web"]
+    )
+    return 0
 
 
 def main() -> int:
@@ -251,15 +271,54 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "analyze":
-        client = httpx.Client()
-        resp = client.post("http://127.0.0.1:8080/api/analyze", json={"url": args.url, "company": args.company})
-        print(resp.text)
+        from .pipeline import analyze_company, result_to_dict
+        result = asyncio.run(
+            analyze_company(
+                url=args.url,
+                company_name=args.company,
+                headless=not args.headful,
+            )
+        )
+        if args.show_email:
+            print("\n=== DRAFT OUTREACH ===\n")
+            print(result.outreach_email)
+            print("\n======================\n")
+        
+        output_data = result_to_dict(result)
+        if args.out:
+            _persist_json(output_data, Path(args.out))
+        else:
+            print(json.dumps(output_data, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "discover":
-        client = httpx.Client()
-        resp = client.post("http://127.0.0.1:8080/api/discover", json={"company": args.company, "city": args.city})
-        print(resp.text)
+        from .pipeline import discover_and_analyze_company, result_to_dict
+        result = asyncio.run(
+            discover_and_analyze_company(
+                company_name=args.company,
+                city=args.city,
+                headless=not args.headful,
+                site_max_results=args.site_results,
+                news_max_results=args.news_results,
+            )
+        )
+        
+        if args.show_news and result.discovery:
+            print("\n=== TOP NEWS ===")
+            for item in result.discovery.news_results[:3]:
+                print(f"- {item.title}\n  {item.url}")
+            print("================\n")
+            
+        if args.show_email:
+            print("\n=== DRAFT OUTREACH ===\n")
+            print(result.outreach_email)
+            print("\n======================\n")
+
+        output_data = result_to_dict(result)
+        if args.out:
+            _persist_json(output_data, Path(args.out))
+        else:
+            print(json.dumps(output_data, ensure_ascii=False, indent=2))
         return 0
 
     config = AppConfig.from_env()
@@ -401,13 +460,48 @@ def main() -> int:
 
     if args.command == "campaign":
         if args.campaign_command == "run":
-            client = httpx.Client(timeout=120.0)
-            if args.leads:
-                files = {'file': open(args.leads, 'rb')}
-                resp = client.post("http://127.0.0.1:8080/api/campaigns", files=files)
-            else:
-                resp = client.post("http://127.0.0.1:8080/api/campaigns")
-            print(resp.text)
+            try:
+                store = _store(config)
+            except RuntimeError as exc:
+                print(str(exc))
+                return 1
+            llm = _llm(config)
+            from .campaign import run_campaign
+            
+            try:
+                summary, path, _ = run_campaign(
+                    config=config,
+                    store=store,
+                    llm=llm,
+                    parent_slug=args.slug,
+                    leads_csv_path=args.leads,
+                    out_dir=args.out_dir,
+                    sheet_id=args.sheet_id,
+                    sheet_title=args.sheet_title,
+                    sheet_share_with=args.sheet_share_with,
+                    drive_folder_id=args.drive_folder_id,
+                    gsheets_auth=args.gsheets_auth,
+                    stages=args.stages,
+                    headless=not args.headful,
+                    recipient_mode=args.recipient_mode,
+                    variant_mode=args.variant_mode,
+                    output_schema=args.output_schema,
+                    llm_policy=args.llm_policy,
+                    enrichment_mode=args.enrichment_mode,
+                    max_concurrency=args.max_concurrency,
+                    max_retries=args.max_retries,
+                    backoff_base_seconds=args.backoff_base_seconds,
+                    cost_cap_eur=args.cost_cap_eur,
+                    force_cost_override=args.force_cost_override,
+                    io_mode=args.io_mode,
+                    workspace_folder_id=args.workspace_folder_id,
+                    research_sources=args.research_sources,
+                )
+                print(json.dumps(asdict(summary), ensure_ascii=False, indent=2))
+                print(f"Exported to {path}")
+            except Exception as e:
+                print(f"Campaign failed: {e}")
+                return 1
             return 0
 
         if args.campaign_command == "status":

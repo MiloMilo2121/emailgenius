@@ -256,13 +256,18 @@ def _sync_knowledge_folder(
             with tempfile.TemporaryDirectory() as tmpdir:
                 local_path = Path(tmpdir) / name
                 local_path.write_bytes(payload)
-                ingest_knowledge_file(
-                    store=store,
-                    llm=llm,
-                    parent_slug=resolved_parent_slug,
-                    file_path=str(local_path),
-                    kind="marketing",
-                )
+                import asyncio
+                from psycopg_pool import AsyncConnectionPool
+                from .storage import AsyncPostgresStore
+                async def _do_ingest():
+                    pool = AsyncConnectionPool(conninfo=store._dsn, open=False)
+                    await pool.open(wait=True)
+                    try:
+                        async_store = AsyncPostgresStore(pool)
+                        await ingest_knowledge_file(store=async_store, llm=llm, parent_slug=resolved_parent_slug, file_path=str(local_path), kind="marketing")
+                    finally:
+                        await pool.close()
+                asyncio.run(_do_ingest())
             if processed_folder_id:
                 _move_file_to_folder(drive_client, file_id=file_id, target_folder_id=processed_folder_id)
             store.upsert_drive_file_sync_state(

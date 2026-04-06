@@ -61,7 +61,7 @@ class _RowOutcome:
     error_message: str | None
 
 
-def run_campaign_legacy(
+def run_campaign(
     *,
     config: AppConfig,
     store: PostgresStore,
@@ -1040,71 +1040,84 @@ def _process_company_like_item(
     company, contacts = build_company_and_contacts(canonical_rows)
     primary_contact = select_primary_contact(contacts)
 
-    template_only = False
     used_llm = False
     template_warning = ""
     enrichment_warning = ""
     snippets: list[str] = []
-    global_flags: list[str] = []
     enrichment_flags: list[str] = []
     nebula_payload: dict[str, object] = {}
 
+    checkpointer_builder = getattr(store, "build_langgraph_checkpointer", None)
+    checkpointer = checkpointer_builder() if callable(checkpointer_builder) else None
+    engine = CampaignAgentEngine(llm=llm, checkpointer=checkpointer)
+
     if research_client.configured and research_sources:
-        return _process_company_with_instantly_pipeline(
-            campaign_id=campaign_id,
-            parent_slug=parent_slug,
-            parent=parent,
-            company=company,
-            primary_contact=primary_contact,
-            raw_row=raw_row,
-            store=store,
-            llm=llm,
-            llm_policy=llm_policy,
-            output_schema=output_schema,
-            research_client=research_client,
-            research_sources=research_sources,
-            row_index=row_index,
-        )
-
-    if not company.website:
-        # If the lead has no website, do not waste tokens or attempt web enrichment: use the seed template as-is.
-        template_only = True
-        dossier = _minimal_dossier(company_name=company.company_name)
-        nebula = run_nebula_enrichment_machine(
-            company=company,
-            contact=primary_contact,
-            dossier=dossier,
-        )
-        nebula_payload = nebula.to_dict()
-        rendered = format_email_body(render_seed_template(parent, company, primary_contact))
-        subject = format_email_subject(_template_only_subject(company=company, contact=primary_contact))
-        cleaned_text, claim_flags = apply_claim_guard(
-            f"Oggetto: {subject}\n\n{rendered}",
-            parent.no_go_claims,
-        )
-        if "\n\n" in cleaned_text:
-            subject_line, body_text = cleaned_text.split("\n\n", 1)
-            subject = format_email_subject(subject_line.replace("Oggetto:", "").strip() or subject)
-            rendered = format_email_body(body_text.strip() or rendered)
-
-        requested_variants = ["A", "B", "C"] if variant_mode.lower() == "abc" else ["A", "B"]
-        base_flags = sorted(set(claim_flags + ["template_only_no_website"]))
-        variants = [
-            DraftEmailVariant(
-                variant=name,
-                subject=subject,
-                body=rendered,
-                cta=parent.cta_policy,
-                risk_flags=base_flags,
-                confidence=0.55,
-            )
-            for name in requested_variants
-        ]
-        recommended_variant = requested_variants[0] if requested_variants else "A"
-        template_warning = "Website mancante: usato seed template senza personalizzazione web."
-    else:
-        used_llm = True
         try:
+            used_llm = True
+            research_bundle = research_client.collect_company_research(
+                company=company,
+                contact=primary_contact,
+                research_sources=research_sources,
+            )
+            research_dossier = llm.generate_research_dossier(
+                parent=parent,
+                company=company,
+                contact=primary_contact,
+                research_bundle=research_bundle,
+                llm_policy=llm_policy,
+            )
+            snippets.append(f"Research Summary: {research_dossier.company_summary}")
+            if research_dossier.key_facts:
+                snippets.append("Key Facts: " + " | ".join(research_dossier.key_facts))
+            if research_dossier.recent_news:
+                news_text = " | ".join(f"{n.title}: {n.snippet}" for n in research_dossier.recent_news)
+                snippets.append("Recent News: " + news_text)
+            
+            # Helper to convert to enrichment dossier
+            dossier = EnrichmentDossier(
+                site_summary=research_dossier.company_summary,
+                news_items=research_dossier.recent_news,
+                linkedin_public_summary="",
+                pain_hypotheses=[research_dossier.pain_hypothesis] if research_dossier.pain_hypothesis else [],
+                opportunity_hypotheses=[research_dossier.personalization_angle] if research_dossier.personalization_angle else [],
+                evidence=research_dossier.key_facts,
+                sources=research_dossier.citations,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            return _RowOutcome(
+                row_index=row_index,
+                export_row=_error_row(
+                    campaign_id=campaign_id,
+                    parent_slug=parent_slug,
+                    raw_row=raw_row,
+                    error_code="FAILED_RESEARCH_PIPELINE",
+                    warning_message=message,
+                    output_schema=output_schema,
+                ),
+                result=None,
+                extra_payload={
+                    "used_llm": True,
+                    "research_mode": "exa_openrouter",
+                    "research_sources": research_sources,
+                },
+                warning=True,
+                failed=True,
+                fatal_error=(llm_policy == "strict"),
+                error_message=message,
+            )
+    else:
+        if not company.website:
+            template_warning = "Website mancante: usato seed template senza personalizzazione web."
+            dossier = _minimal_dossier(company_name=company.company_name)
+            nebula = run_nebula_enrichment_machine(
+                company=company,
+                contact=primary_contact,
+                dossier=dossier,
+            )
+            nebula_payload = nebula.to_dict()
+        else:
+            used_llm = True
             if effective_enrichment_mode == "minimal":
                 dossier = _minimal_dossier(company_name=company.company_name)
                 discovered_website = company.website
@@ -1158,107 +1171,58 @@ def _process_company_like_item(
 
             snippets = _dedupe_snippets(snippets, limit=14)
 
-            variants, recommended_variant, global_flags = llm.generate_campaign_variants(
-                parent=parent,
-                company=company,
-                contact=primary_contact,
-                dossier=dossier,
-                marketing_snippets=snippets,
-                variant_mode=variant_mode,
-                llm_policy=llm_policy,
-                max_retries=max_retries,
-                backoff_base_seconds=backoff_base_seconds,
-            )
-            if enrichment_flags:
-                for variant in variants:
-                    flags = list(variant.risk_flags or [])
-                    variant.risk_flags = sorted(set(flags + enrichment_flags))
-        except RuntimeError as exc:
-            message = str(exc)
-            if llm_policy == "strict" and ("LLM fatal error" in message or "LLM unavailable" in message):
-                return _RowOutcome(
-                    row_index=row_index,
-                    export_row={},
-                    result=None,
-                    extra_payload={
-                        "used_llm": used_llm,
-                        "template_only": template_only,
-                        "nebula": nebula_payload,
-                    },
-                    warning=True,
-                    failed=True,
-                    fatal_error=True,
-                    error_message=message,
-                )
-
-            error_code = "FAILED_LLM_RETRY_EXHAUSTED"
-            export_row = _error_row(
-                campaign_id=campaign_id,
-                parent_slug=parent_slug,
-                raw_row=raw_row,
-                error_code=error_code,
-                warning_message=message,
-                output_schema=output_schema,
-            )
+    try:
+        sequence = engine.generate_sequence(
+            parent=parent,
+            company=company,
+            contact=primary_contact,
+            dossier=dossier,
+            marketing_snippets=snippets,
+            llm_policy=llm_policy,
+        )
+    except Exception as exc:
+        message = str(exc)
+        if llm_policy == "strict" and ("LLM fatal error" in message or "LLM unavailable" in message):
             return _RowOutcome(
                 row_index=row_index,
-                export_row=export_row,
+                export_row={},
                 result=None,
                 extra_payload={
                     "used_llm": used_llm,
-                    "template_only": template_only,
                     "nebula": nebula_payload,
                 },
                 warning=True,
                 failed=True,
-                fatal_error=False,
+                fatal_error=True,
                 error_message=message,
             )
 
-    # Row-level selection: it's acceptable if one variant fails the copy guard, as long as we can
-    # select at least one passing final variant.
-    all_variant_flags = sorted({flag for v in variants for flag in v.risk_flags})
-    if not dossier.sources:
-        all_variant_flags = sorted(set(all_variant_flags + ["limited_sources"]))
+        error_code = "FAILED_LLM_RETRY_EXHAUSTED"
+        export_row = _error_row(
+            campaign_id=campaign_id,
+            parent_slug=parent_slug,
+            raw_row=raw_row,
+            error_code=error_code,
+            warning_message=message,
+            output_schema=output_schema,
+        )
+        return _RowOutcome(
+            row_index=row_index,
+            export_row=export_row,
+            result=None,
+            extra_payload={
+                "used_llm": used_llm,
+                "nebula": nebula_payload,
+            },
+            warning=True,
+            failed=True,
+            fatal_error=False,
+            error_message=message,
+        )
 
-    recommended_variant = (recommended_variant or "A").strip().upper()
-    by_name = {item.variant.upper(): item for item in variants}
-    failed_variants = sorted(
-        name for name, item in by_name.items() if "failed_copy_guard" in (item.risk_flags or [])
+    risk_flags = sorted(
+        set(sequence.global_risk_flags + [flag for step in sequence.steps for flag in step.risk_flags] + enrichment_flags)
     )
-    passing_variants = [item for item in variants if "failed_copy_guard" not in (item.risk_flags or [])]
-
-    selected_variant = recommended_variant
-    if selected_variant not in {item.variant.upper() for item in passing_variants}:
-        selected_variant = passing_variants[0].variant.upper() if passing_variants else (selected_variant or "A")
-
-    selected_item = by_name.get(selected_variant)
-    final_subject = selected_item.subject if selected_item else ""
-    final_body = selected_item.body if selected_item else ""
-
-    generation_status = "OK" if passing_variants else "FAILED_COPY_GUARD"
-    error_code = "" if passing_variants else "FAILED_COPY_GUARD"
-
-    warning_parts: list[str] = []
-    if template_warning:
-        warning_parts.append(template_warning)
-    if enrichment_warning:
-        warning_parts.append(enrichment_warning)
-    if not passing_variants:
-        warning_parts.append("Copy guard non superato dopo repair")
-    elif failed_variants:
-        warning_parts.append(f"Copy guard fallito per varianti: {', '.join(failed_variants)}")
-    generation_warning = "; ".join(part for part in warning_parts if part)[:240]
-
-    # Store only row-level risk flags (selected variant + global limited_sources), to avoid poisoning OK rows
-    # with a failed_copy_guard belonging to other variants.
-    row_flags = set(selected_item.risk_flags if selected_item else [])
-    if passing_variants:
-        row_flags.discard("failed_copy_guard")
-    if "limited_sources" in all_variant_flags:
-        row_flags.add("limited_sources")
-    row_risk_flags = sorted(row_flags)
-    warning = bool(row_risk_flags) or bool(failed_variants)
 
     result = CampaignCompanyResult(
         campaign_id=campaign_id,
@@ -1266,172 +1230,56 @@ def _process_company_like_item(
         company=company,
         contact=primary_contact,
         dossier=dossier,
-        variants=variants,
-        recommended_variant=recommended_variant,
+        variants=[],
+        recommended_variant="",
         approval=ApprovalRecord(status="PENDING", updated_at=utc_now_iso()),
-        risk_flags=row_risk_flags,
+        sequence_result=sequence,
+        risk_flags=risk_flags,
     )
 
-    export_row = _company_result_to_row(
-        result=result,
-        raw_row=raw_row,
-        selected_variant=selected_variant,
-        final_subject=final_subject,
-        final_body=final_body,
-        generation_status=generation_status,
-        generation_warning=generation_warning,
-        error_code=error_code,
-        output_schema=output_schema,
-    )
-    extra_payload = {
-        "selected_variant": selected_variant,
+    selected_step = next((item for item in sequence.steps if item.step_id.upper() == "E1"), None)
+    final_subject = selected_step.subject if selected_step else ""
+    final_body = selected_step.body if selected_step else ""
+    generation_warning = ""
+    if risk_flags:
+        generation_warning = "; ".join(risk_flags)[:240]
+
+    export_row = dict(raw_row)
+    export_row.update({
+        "campaign_id": campaign_id,
+        "parent_slug": parent_slug,
+        "company_name": company.company_name,
+        "contact_name": primary_contact.full_name if primary_contact else "",
+        "contact_title": primary_contact.title if primary_contact else "",
+        "contact_email": primary_contact.email if primary_contact else "",
         "final_subject": final_subject,
         "final_body": final_body,
-        "generation_status": generation_status,
+        "generation_status": "OK",
         "generation_warning": generation_warning,
-        "error_code": error_code,
+        "error_code": "",
+        "risk_flags": "; ".join(risk_flags),
+        "status": "PENDING",
+        "sequence_steps": len(sequence.steps),
+        "attack_angle": sequence.attack_angle,
+    })
+
+    extra_payload = {
+        "final_subject": final_subject,
+        "final_body": final_body,
+        "generation_status": "OK",
+        "generation_warning": generation_warning,
+        "error_code": "",
         "used_llm": used_llm,
-        "template_only": template_only,
         "raw_row": raw_row,
         "nebula": nebula_payload,
     }
+
     return _RowOutcome(
         row_index=row_index,
         export_row=export_row,
         result=result,
         extra_payload=extra_payload,
-        warning=warning,
-        failed=generation_status != "OK",
-        fatal_error=False,
-        error_message=None,
-    )
-
-
-def _process_company_with_instantly_pipeline(
-    *,
-    campaign_id: str,
-    parent_slug: str,
-    parent,
-    company,
-    primary_contact,
-    raw_row: dict[str, str],
-    store: PostgresStore,
-    llm: LLMGateway,
-    llm_policy: str,
-    output_schema: str,
-    research_client: ExaClient,
-    research_sources: list[str],
-    row_index: int,
-) -> _RowOutcome:
-    try:
-        research_bundle = research_client.collect_company_research(
-            company=company,
-            contact=primary_contact,
-            research_sources=research_sources,
-        )
-        research_dossier = llm.generate_research_dossier(
-            parent=parent,
-            company=company,
-            contact=primary_contact,
-            research_bundle=research_bundle,
-            llm_policy=llm_policy,
-        )
-        instantly_draft = llm.generate_instantly_draft(
-            parent=parent,
-            company=company,
-            contact=primary_contact,
-            research_dossier=research_dossier,
-            llm_policy=llm_policy,
-        )
-    except RuntimeError as exc:
-        message = str(exc)
-        return _RowOutcome(
-            row_index=row_index,
-            export_row=_error_row(
-                campaign_id=campaign_id,
-                parent_slug=parent_slug,
-                raw_row=raw_row,
-                error_code="FAILED_RESEARCH_PIPELINE",
-                warning_message=message,
-                output_schema=output_schema,
-            ),
-            result=None,
-            extra_payload={
-                "used_llm": True,
-                "template_only": False,
-                "research_mode": "exa_openrouter",
-                "research_sources": research_sources,
-            },
-            warning=True,
-            failed=True,
-            fatal_error=(llm_policy == "strict"),
-            error_message=message,
-        )
-
-    final_subject = instantly_draft.subject_line
-    final_body = render_instantly_email(
-        parent,
-        company,
-        primary_contact,
-        instantly_draft.personalization,
-    )
-    variant = DraftEmailVariant(
-        variant="A",
-        subject=final_subject,
-        body=final_body,
-        cta=parent.cta_policy,
-        risk_flags=list(instantly_draft.risk_flags),
-        confidence=instantly_draft.confidence,
-    )
-    generation_status = "OK"
-    citations = list(research_dossier.citations or [])
-    row_flags = set(instantly_draft.risk_flags)
-    if not citations:
-        row_flags.add("limited_sources")
-    result = CampaignCompanyResult(
-        campaign_id=campaign_id,
-        parent_slug=parent_slug,
-        company=company,
-        contact=primary_contact,
-        dossier=_research_dossier_to_enrichment_dossier(research_dossier),
-        variants=[variant],
-        recommended_variant="A",
-        approval=ApprovalRecord(status="PENDING", updated_at=utc_now_iso()),
-        research_dossier=research_dossier,
-        instantly_draft=instantly_draft,
-        risk_flags=sorted(row_flags),
-    )
-    export_row = _company_result_to_row(
-        result=result,
-        raw_row=raw_row,
-        selected_variant="A",
-        final_subject=final_subject,
-        final_body=final_body,
-        generation_status=generation_status,
-        generation_warning="",
-        error_code="",
-        output_schema=output_schema,
-    )
-    extra_payload = {
-        "selected_variant": "A",
-        "final_subject": final_subject,
-        "final_body": final_body,
-        "generation_status": generation_status,
-        "generation_warning": "",
-        "error_code": "",
-        "used_llm": True,
-        "template_only": False,
-        "raw_row": raw_row,
-        "research_mode": "exa_openrouter",
-        "research_sources": research_sources,
-        "research_bundle": research_bundle,
-    }
-    return _RowOutcome(
-        row_index=row_index,
-        export_row=export_row,
-        result=result,
-        extra_payload=extra_payload,
-        warning=bool(row_flags),
+        warning=bool(risk_flags),
         failed=False,
         fatal_error=False,
         error_message=None,
