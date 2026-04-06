@@ -6,6 +6,10 @@ import re
 from urllib.parse import urlparse
 
 from duckduckgo_search import DDGS
+try:
+    from duckduckgo_search.exceptions import RatelimitException as _DDGRatelimit
+except ImportError:
+    _DDGRatelimit = None
 from duckduckgo_search.exceptions import DuckDuckGoSearchException
 
 from tavily import TavilyClient
@@ -156,7 +160,9 @@ def search_news_web(query: str, *, max_results: int = 8, timeout_s: int = DEFAUL
         try:
             hits = _map_ddg_hits(list(DDGS(timeout=timeout_s).news(query, max_results=max_results)), max_results=max_results)
         except Exception as exc:
-            if "RatelimitException" in str(type(exc)) or "Ratelimit" in str(exc):
+            if _DDGRatelimit and isinstance(exc, _DDGRatelimit):
+                logger.warning("DDG rate limit hit for query: %s", query)
+            elif "RatelimitException" in str(type(exc)) or "Ratelimit" in str(exc):
                 logger.warning("DDG news fallback rate limited for query: %s", query)
             else:
                 logger.warning("DDG news fallback failed for query: %s", query, exc_info=True)
@@ -181,7 +187,9 @@ def search_web(query: str, *, max_results: int = 8, timeout_s: int = DEFAULT_TIM
         try:
             return _map_ddg_hits(list(DDGS(timeout=timeout_s).text(query, max_results=max_results)), max_results=max_results)
         except Exception as exc:
-            if "RatelimitException" in str(type(exc)) or "Ratelimit" in str(exc):
+            if _DDGRatelimit and isinstance(exc, _DDGRatelimit):
+                logger.warning("DDG rate limit hit for query: %s", query)
+            elif "RatelimitException" in str(type(exc)) or "Ratelimit" in str(exc):
                 logger.warning("DDG web fallback rate limited for query: %s", query)
             else:
                 logger.warning("DDG web fallback failed for query: %s", query, exc_info=True)

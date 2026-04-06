@@ -511,7 +511,18 @@ def _launch_background_job(
             if not completed:
                 registry.mark_failed(job_id, error="Il thread è terminato in modo anomalo")
 
-    threading.Thread(target=runner, name=f"emailgenius-job-{job_id}", daemon=True).start()
+    import os
+    MAX_JOB_SECONDS = int(os.getenv("EMAILGENIUS_JOB_TIMEOUT_SECONDS", "3600"))
+
+    t = threading.Thread(target=runner, name=f"emailgenius-job-{job_id}", daemon=True)
+    t.start()
+    
+    def _watchdog() -> None:
+        t.join(timeout=MAX_JOB_SECONDS)
+        if t.is_alive():
+            registry.mark_failed(job_id, error=f"Job timeout dopo {MAX_JOB_SECONDS}s")
+            
+    threading.Thread(target=_watchdog, daemon=True).start()
 
 
 def _run_local_campaign_job(

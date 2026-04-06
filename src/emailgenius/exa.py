@@ -17,7 +17,8 @@ class ExaClient:
     def __init__(self, api_key: str | None) -> None:
         self._api_key = (api_key or "").strip()
         if not self._api_key:
-            print("[warning] EXA_API_KEY is not configured. ExaClient will return empty results.")
+            import logging
+            logging.getLogger(__name__).warning("ExaClient non configurato (EXA_API_KEY mancante): ricerche web disabilitate, la personalizzazione delle email sarà ridotta.")
 
     @property
     def configured(self) -> bool:

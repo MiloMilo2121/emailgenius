@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from typing import Any
 
 from .guardrails import apply_claim_guard
@@ -123,7 +122,6 @@ class CampaignAgentEngine:
         }
 
         state = self._strategist_node(state)
-        state = self._strategist_node(state)
         for attempt in range(self._max_compliance_retries + 1):
             state = self._icebreaker_writer_node(state)
             state = self._followup_writer_node(state)
@@ -163,6 +161,7 @@ class CampaignAgentEngine:
             ),
             payload=prompt_payload,
             llm_policy=str(state.get("llm_policy") or "strict"),
+            research=True,
         )
         
         fallback_angle = "Outreach consultivo con ipotesi operativa"
@@ -321,9 +320,18 @@ class CampaignAgentEngine:
         system_prompt: str,
         payload: dict[str, object],
         llm_policy: str,
+        research: bool = False,
     ) -> dict[str, Any]:
         resolved_policy = self._normalize_llm_policy(llm_policy)
-        call = getattr(self._llm, "_call_chat_json", None)
+        if research:
+            call = getattr(self._llm, "_call_research_json", None)
+            if not call:
+                call = getattr(self._llm, "_call_chat_json_targets", None)
+                if call:
+                    call = lambda **k: getattr(self._llm, "_call_chat_json_targets")(targets=self._llm._research_targets, **k)
+        else:
+            call = getattr(self._llm, "_call_chat_json", None)
+
         if not callable(call):
             if resolved_policy == "strict":
                 raise RuntimeError("LLM unavailable: configure OPENAI_API_KEY or set llm_policy=fallback")

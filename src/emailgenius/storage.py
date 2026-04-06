@@ -168,7 +168,12 @@ class PostgresStore:
         except Exception as e:
             print(f"[migrate] Core schema migration failed: {e}")
             raise
-        self._setup_langgraph_checkpoint_schema()
+            
+        try:
+            self._setup_langgraph_checkpoint_schema()
+        except Exception as e:
+            print(f"[migrate] LangGraph checkpoint schema non disponibile ({e}). "
+                  "Il checkpointing degli agenti sarà disabilitato.")
 
     def upsert_parent_profile(self, profile: ParentProfile, *, set_active: bool = False) -> None:
         payload = json.dumps(parent_profile_to_dict(profile), ensure_ascii=False)

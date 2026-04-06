@@ -299,10 +299,7 @@ class LLMGateway:
             "parent_profile": parent.model_dump(),
             "target_company": company.model_dump(),
             "target_contact": contact.model_dump() if contact else None,
-            "dossier": {
-                **dossier.model_dump(),
-                "news_items": [item.model_dump() for item in dossier.news_items],
-            },
+            "dossier": dossier.model_dump(),
             "real_personalization_insights": [
                 {"fact": fact, "meaning": meaning}
                 for fact, meaning in real_insights
@@ -547,7 +544,7 @@ class LLMGateway:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
         )
-        
+
     def _call_research_json(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
         return self._call_chat_json_targets(
             targets=self._research_targets,
