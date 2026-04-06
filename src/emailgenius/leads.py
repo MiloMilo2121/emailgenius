@@ -170,19 +170,20 @@ def build_company_and_contacts(company_rows: list[dict[str, str]]) -> tuple[Lead
         website = _clean_url(row.get("Company Website Full"))
         if website:
             break
-    company = LeadCompany(
-        company_key=_company_key(first),
-        company_name=_first_non_empty(first, ["Company Name", "Cleaned Company Name"]) or "Azienda",
-        website=website,
-        linkedin_company=_clean_url(first.get("Company LinkedIn Link")),
-        industry=_empty_to_none(first.get("Industry")),
-        employee_count=_parse_int(first.get("Employee Count")),
-        location=_build_location(first),
-        keywords=_empty_to_none(first.get("Company Keywords")),
-        tech=_empty_to_none(first.get("Company Technologies")),
-        founded_year=_parse_int(first.get("Company Founded Year")),
-        evidence=_compact_company_evidence(first),
-    )
+    company_data = {
+        "company_key": _company_key(first),
+        "company_name": _first_non_empty(first, ["Company Name", "Cleaned Company Name"]) or "Azienda",
+        "website": website,
+        "linkedin_company": _clean_url(first.get("Company LinkedIn Link")),
+        "industry": _empty_to_none(first.get("Industry")),
+        "employee_count": _parse_int(first.get("Employee Count")),
+        "location": _build_location(first),
+        "keywords": _empty_to_none(first.get("Company Keywords")),
+        "tech": _empty_to_none(first.get("Company Technologies")),
+        "founded_year": _parse_int(first.get("Company Founded Year")),
+        "evidence": _compact_company_evidence(first),
+    }
+    company = LeadCompany(**company_data)
 
     contacts = [build_contact(row) for row in company_rows]
     return company, contacts
@@ -205,16 +206,17 @@ def build_contact(row: dict[str, str]) -> LeadContact:
         row=row,
     )
 
-    return LeadContact(
-        full_name=full_name or "Contatto",
-        title=title,
-        seniority=seniority,
-        email=email,
-        linkedin_person=linkedin,
-        quality_flag=quality_flag,
-        score=score,
-        raw=row,
-    )
+    contact_data = {
+        "full_name": full_name or "Contatto",
+        "title": title,
+        "seniority": seniority,
+        "email": email,
+        "linkedin_person": linkedin,
+        "quality_flag": quality_flag,
+        "score": score,
+        "raw": row,
+    }
+    return LeadContact(**contact_data)
 
 
 def select_primary_contact(contacts: list[LeadContact]) -> LeadContact | None:
