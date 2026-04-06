@@ -8,17 +8,9 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from psycopg_pool import AsyncConnectionPool
-
-from .campaign import campaign_status, export_campaign, run_campaign
 from .config import AppConfig
-from .knowledge import ingest_knowledge_file
-from .llm import LLMGateway
-from .pipeline import analyze_company_sync, discover_and_analyze_company_sync, result_to_dict
-from .profiles import load_parent_profile
-from .sheets import publish_campaign_to_sheets
-from .storage import AsyncPostgresStore, PostgresStore
 from .utils import slugify
+import httpx
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -251,84 +243,7 @@ def _persist_json(payload: dict, output_path: Path) -> None:
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _store(config: AppConfig) -> PostgresStore:
-    try:
-        store = PostgresStore(config.database_url)
-        store.migrate()
-        return store
-    except Exception as exc:  # pragma: no cover - env dependent
-        raise RuntimeError(
-            "Database unavailable. Configure EMAILGENIUS_DATABASE_URL and ensure PostgreSQL+pgvector is running."
-        ) from exc
-
-
-def _llm(config: AppConfig) -> LLMGateway:
-    return LLMGateway(
-        api_key=config.openai_api_key,
-        api_base_url=config.openai_base_url,
-        chat_model=config.openai_chat_model,
-        embedding_model=config.openai_embedding_model,
-        fallback_api_key=config.openai_fallback_api_key,
-        fallback_api_base_url=config.openai_fallback_base_url,
-        fallback_chat_model=config.openai_fallback_chat_model,
-        research_model=config.research_model,
-        writer_model=config.writer_model,
-        writer_fallback_model=config.writer_fallback_model,
-    )
-
-
-def _resolve_workspace_slug(store: PostgresStore, explicit_slug: str | None) -> str:
-    if explicit_slug:
-        return explicit_slug
-    active = store.get_active_parent_slug()
-    if active:
-        return active
-    profiles = store.list_parent_profiles()
-    if len(profiles) == 1:
-        return profiles[0].slug
-    raise ValueError("Parent slug not resolved. Pass --slug or set an active parent profile.")
-
-
-def _run_workspace_sync_once(
-    *,
-    config: AppConfig,
-    store: PostgresStore,
-    llm: LLMGateway,
-    slug: str | None,
-    workspace_folder_id: str | None,
-    out_dir: str,
-    gsheets_auth: str,
-    headless: bool,
-    llm_policy: str,
-) -> int:
-    resolved_slug = _resolve_workspace_slug(store, slug)
-    summary, export_path, _ = run_campaign(
-        config=config,
-        store=store,
-        llm=llm,
-        parent_slug=resolved_slug,
-        leads_csv_path=None,
-        out_dir=out_dir,
-        sheet_id=None,
-        gsheets_auth=gsheets_auth,
-        stages="all",
-        headless=headless,
-        recipient_mode="row",
-        variant_mode="ab",
-        output_schema="ab",
-        llm_policy=llm_policy,
-        enrichment_mode="auto",
-        max_concurrency=1,
-        max_retries=3,
-        backoff_base_seconds=1.0,
-        cost_cap_eur=999999.0,
-        force_cost_override=True,
-        io_mode="drive",
-        workspace_folder_id=workspace_folder_id or config.workspace_folder_id,
-    )
-    print(f"[workspace] campaign={summary.campaign_id} rows_ok={summary.rows_generated_ok} rows_failed={summary.rows_failed}")
-    print(f"[workspace] export={export_path}")
-    return 0
+# Heavy internal store methods abstracted out
 
 
 def main() -> int:
@@ -336,63 +251,15 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "analyze":
-        result = analyze_company_sync(
-            url=args.url,
-            company_name=args.company,
-            headless=not args.headful,
-        )
-        payload = result_to_dict(result)
-
-        output_path = Path(args.out) if args.out else Path("reports") / f"{slugify(args.company)}.json"
-        _persist_json(payload, output_path)
-
-        print(f"Saved analysis to: {output_path}")
-        print(
-            "Eligibility: "
-            f"{result.eligibility.eligible} | rate={result.eligibility.estimated_credit_rate} "
-            f"| confidence={result.eligibility.confidence}"
-        )
-        if args.show_email:
-            print("\n--- Outreach Draft ---\n")
-            print(result.outreach_email)
+        client = httpx.Client()
+        resp = client.post("http://127.0.0.1:8080/api/analyze", json={"url": args.url, "company": args.company})
+        print(resp.text)
         return 0
 
     if args.command == "discover":
-        try:
-            result = discover_and_analyze_company_sync(
-                company_name=args.company,
-                city=args.city,
-                headless=not args.headful,
-                site_max_results=args.site_results,
-                news_max_results=args.news_results,
-            )
-        except RuntimeError as exc:
-            print(f"Discovery failed: {exc}")
-            return 1
-
-        payload = result_to_dict(result)
-        city_part = f"-{slugify(args.city)}" if args.city else ""
-        output_path = Path(args.out) if args.out else Path("reports") / f"{slugify(args.company)}{city_part}.json"
-        _persist_json(payload, output_path)
-
-        print(f"Saved analysis to: {output_path}")
-        if result.discovery and result.discovery.selected_site:
-            print(f"Selected website: {result.discovery.selected_site.url}")
-            print(f"Site query: {result.discovery.site_query}")
-            print(f"News query: {result.discovery.news_query}")
-        print(
-            "Eligibility: "
-            f"{result.eligibility.eligible} | rate={result.eligibility.estimated_credit_rate} "
-            f"| confidence={result.eligibility.confidence}"
-        )
-        if args.show_news and result.discovery:
-            print("\n--- News Links ---")
-            for index, item in enumerate(result.discovery.news_results, start=1):
-                print(f"{index}. {item.title} -> {item.url}")
-
-        if args.show_email:
-            print("\n--- Outreach Draft ---\n")
-            print(result.outreach_email)
+        client = httpx.Client()
+        resp = client.post("http://127.0.0.1:8080/api/discover", json={"company": args.company, "city": args.city})
+        print(resp.text)
         return 0
 
     config = AppConfig.from_env()
@@ -534,55 +401,13 @@ def main() -> int:
 
     if args.command == "campaign":
         if args.campaign_command == "run":
-            try:
-                store = _store(config)
-            except RuntimeError as exc:
-                print(str(exc))
-                return 1
-            llm = _llm(config)
-            if args.io_mode == "local" and not args.leads:
-                print("--leads is required when --io-mode local")
-                return 1
-            summary, export_path, _ = run_campaign(
-                config=config,
-                store=store,
-                llm=llm,
-                parent_slug=args.slug,
-                leads_csv_path=args.leads,
-                out_dir=args.out_dir,
-                sheet_id=args.sheet_id,
-                sheet_title=args.sheet_title,
-                sheet_share_with=args.sheet_share_with,
-                drive_folder_id=args.drive_folder_id,
-                gsheets_auth=args.gsheets_auth,
-                stages=args.stages,
-                headless=not args.headful,
-                recipient_mode=args.recipient_mode,
-                variant_mode=args.variant_mode,
-                output_schema=args.output_schema,
-                llm_policy=args.llm_policy,
-                enrichment_mode=args.enrichment_mode,
-                max_concurrency=args.max_concurrency,
-                max_retries=args.max_retries,
-                backoff_base_seconds=args.backoff_base_seconds,
-                cost_cap_eur=args.cost_cap_eur,
-                force_cost_override=args.force_cost_override,
-                io_mode=args.io_mode,
-                workspace_folder_id=args.workspace_folder_id or config.workspace_folder_id,
-                research_sources=args.research_sources,
-            )
-            print(f"Campaign completed: {summary.campaign_id}")
-            print(f"Companies: {summary.companies_total} | generated: {summary.generated_total} | warnings: {summary.warnings_total}")
-            print(f"Local export: {export_path}")
-            print(
-                "Rows: "
-                f"total={summary.rows_total} valid={summary.rows_valid} skipped={summary.rows_skipped} "
-                f"ok={summary.rows_generated_ok} failed={summary.rows_failed}"
-            )
-            print(
-                "Costs: "
-                f"estimated={summary.estimated_cost_eur:.2f} EUR actual={summary.actual_cost_eur:.2f} EUR"
-            )
+            client = httpx.Client(timeout=120.0)
+            if args.leads:
+                files = {'file': open(args.leads, 'rb')}
+                resp = client.post("http://127.0.0.1:8080/api/campaigns", files=files)
+            else:
+                resp = client.post("http://127.0.0.1:8080/api/campaigns")
+            print(resp.text)
             return 0
 
         if args.campaign_command == "status":

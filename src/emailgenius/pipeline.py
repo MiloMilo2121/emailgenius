@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
 from datetime import datetime, timezone
 
 from .browser import fetch_website_snapshot
@@ -37,10 +36,6 @@ async def analyze_company(
         eligibility=eligibility,
         outreach_email=outreach_email,
     )
-
-
-def analyze_company_sync(*, url: str, company_name: str, headless: bool = True) -> AnalysisResult:
-    return asyncio.run(analyze_company(url=url, company_name=company_name, headless=headless))
 
 
 async def discover_and_analyze_company(
@@ -79,24 +74,5 @@ async def discover_and_analyze_company(
     return result
 
 
-def discover_and_analyze_company_sync(
-    *,
-    company_name: str,
-    city: str | None,
-    headless: bool = True,
-    site_max_results: int = 10,
-    news_max_results: int = 8,
-) -> AnalysisResult:
-    return asyncio.run(
-        discover_and_analyze_company(
-            company_name=company_name,
-            city=city,
-            headless=headless,
-            site_max_results=site_max_results,
-            news_max_results=news_max_results,
-        )
-    )
-
-
 def result_to_dict(result: AnalysisResult) -> dict:
-    return asdict(result)
+    return result.model_dump()

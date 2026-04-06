@@ -61,7 +61,7 @@ class _RowOutcome:
     error_message: str | None
 
 
-def run_campaign(
+def run_campaign_legacy(
     *,
     config: AppConfig,
     store: PostgresStore,
