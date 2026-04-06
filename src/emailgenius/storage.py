@@ -723,3 +723,491 @@ class AsyncPostgresStore:
                 await cur.execute("SELECT 1")
                 await cur.fetchone()
         return True
+
+    async def migrate(self) -> None:
+        ddl = [
+            "CREATE EXTENSION IF NOT EXISTS vector",
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS parent_profiles (
+                slug TEXT PRIMARY KEY,
+                profile_json JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_documents (
+                id UUID PRIMARY KEY,
+                parent_slug TEXT NOT NULL REFERENCES parent_profiles(slug) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                source_hash TEXT NOT NULL,
+                metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_document_unique
+            ON knowledge_documents(parent_slug, kind, source_hash)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_chunks (
+                id UUID PRIMARY KEY,
+                document_id UUID NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+                parent_slug TEXT NOT NULL REFERENCES parent_profiles(slug) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                chunk_index INT NOT NULL,
+                content TEXT NOT NULL,
+                metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                embedding VECTOR(1536),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_parent_kind
+            ON knowledge_chunks(parent_slug, kind)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_embedding_hnsw
+            ON knowledge_chunks USING hnsw (embedding vector_cosine_ops)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS campaigns (
+                id UUID PRIMARY KEY,
+                parent_slug TEXT NOT NULL REFERENCES parent_profiles(slug) ON DELETE RESTRICT,
+                leads_file TEXT NOT NULL,
+                sheet_id TEXT,
+                status TEXT NOT NULL,
+                started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                finished_at TIMESTAMPTZ,
+                summary_json JSONB NOT NULL DEFAULT '{}'::jsonb
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS campaign_company_records (
+                id UUID PRIMARY KEY,
+                campaign_id UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+                parent_slug TEXT NOT NULL,
+                company_key TEXT NOT NULL,
+                company_name TEXT NOT NULL,
+                contact_name TEXT,
+                contact_title TEXT,
+                contact_email TEXT,
+                payload_json JSONB NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                reviewer TEXT,
+                reviewer_notes TEXT,
+                approved_variant TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_campaign_records_campaign_status
+            ON campaign_company_records(campaign_id, status)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS agent_memories (
+                id UUID PRIMARY KEY,
+                parent_slug TEXT NOT NULL REFERENCES parent_profiles(slug) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                memory_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                score DOUBLE PRECISION NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_memories_parent_kind_created
+            ON agent_memories(parent_slug, kind, created_at DESC)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS drive_file_sync_state (
+                file_id TEXT NOT NULL,
+                modified_time TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (file_id, modified_time, kind)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS drive_row_ingestions (
+                id UUID PRIMARY KEY,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                sheet_id TEXT NOT NULL,
+                tab_name TEXT NOT NULL,
+                row_index INT NOT NULL,
+                modified_time TEXT NOT NULL,
+                campaign_id UUID,
+                record_id UUID,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_drive_row_ingestions_status
+            ON drive_row_ingestions(status, updated_at DESC)
+            """,
+        ]
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                for stmt in ddl:
+                    await cur.execute(stmt)
+            await conn.commit()
+
+    async def upsert_parent_profile(self, profile: ParentProfile, *, set_active: bool = False) -> None:
+        payload = json.dumps(parent_profile_to_dict(profile), ensure_ascii=False)
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO parent_profiles(slug, profile_json)
+                    VALUES (%s, %s::jsonb)
+                    ON CONFLICT (slug)
+                    DO UPDATE SET
+                        profile_json = EXCLUDED.profile_json,
+                        updated_at = NOW()
+                    """,
+                    (profile.slug, payload),
+                )
+                if set_active:
+                    await cur.execute(
+                        """
+                        INSERT INTO app_settings(key, value)
+                        VALUES ('active_parent_slug', %s)
+                        ON CONFLICT (key)
+                        DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                        """,
+                        (profile.slug,),
+                    )
+            await conn.commit()
+
+    async def set_active_parent(self, slug: str) -> None:
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT slug FROM parent_profiles WHERE slug=%s", (slug,))
+                if await cur.fetchone() is None:
+                    raise ValueError(f"Parent slug not found: {slug}")
+                await cur.execute(
+                    """
+                    INSERT INTO app_settings(key, value)
+                    VALUES ('active_parent_slug', %s)
+                    ON CONFLICT (key)
+                    DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                    """,
+                    (slug,),
+                )
+            await conn.commit()
+
+    async def get_active_parent_slug(self) -> str | None:
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT value FROM app_settings WHERE key='active_parent_slug'")
+                row = await cur.fetchone()
+                return str(row["value"]) if row else None
+
+    async def get_parent_profile(self, slug: str) -> ParentProfile | None:
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT profile_json FROM parent_profiles WHERE slug=%s", (slug,))
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                payload = row["profile_json"]
+                if isinstance(payload, str):
+                    payload = json.loads(payload)
+                return parent_profile_from_dict(payload)
+
+    async def list_parent_profiles(self) -> list[ParentProfile]:
+        out: list[ParentProfile] = []
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT profile_json FROM parent_profiles ORDER BY slug")
+                rows = await cur.fetchall()
+                for row in rows:
+                    payload = row["profile_json"]
+                    if isinstance(payload, str):
+                        payload = json.loads(payload)
+                    out.append(parent_profile_from_dict(payload))
+        return out
+
+    async def upsert_knowledge_document(
+        self,
+        *,
+        parent_slug: str,
+        kind: str,
+        source_path: str,
+        source_hash: str,
+        metadata: dict[str, object] | None = None,
+    ) -> str:
+        metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    SELECT id FROM knowledge_documents
+                    WHERE parent_slug=%s AND kind=%s AND source_hash=%s
+                    """,
+                    (parent_slug, kind, source_hash),
+                )
+                row = await cur.fetchone()
+                if row:
+                    doc_id = str(row["id"])
+                    await cur.execute("DELETE FROM knowledge_chunks WHERE document_id=%s", (doc_id,))
+                    await conn.commit()
+                    return doc_id
+
+                doc_id = str(uuid.uuid4())
+                await cur.execute(
+                    """
+                    INSERT INTO knowledge_documents(id, parent_slug, kind, source_path, source_hash, metadata_json)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (doc_id, parent_slug, kind, source_path, source_hash, metadata_json),
+                )
+            await conn.commit()
+            return doc_id
+
+    async def insert_knowledge_chunks(
+        self,
+        *,
+        document_id: str,
+        parent_slug: str,
+        kind: str,
+        chunks: list[str],
+        embeddings: list[list[float]] | None,
+        metadata: dict[str, object] | None = None,
+    ) -> int:
+        metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
+        inserted = 0
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                for idx, chunk in enumerate(chunks):
+                    embedding_sql = _vector_literal(embeddings[idx]) if embeddings else None
+                    await cur.execute(
+                        """
+                        INSERT INTO knowledge_chunks(
+                            id, document_id, parent_slug, kind, chunk_index,
+                            content, metadata_json, embedding
+                        ) VALUES (
+                            %s, %s, %s, %s, %s,
+                            %s, %s::jsonb, %s::vector
+                        )
+                        """,
+                        (
+                            str(uuid.uuid4()),
+                            document_id,
+                            parent_slug,
+                            kind,
+                            idx,
+                            chunk,
+                            metadata_json,
+                            embedding_sql,
+                        ),
+                    )
+                    inserted += 1
+            await conn.commit()
+        return inserted
+
+    async def list_knowledge_documents(self, parent_slug: str) -> list[dict[str, object]]:
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    SELECT id, kind, source_path, source_hash, created_at
+                    FROM knowledge_documents
+                    WHERE parent_slug=%s
+                    ORDER BY created_at DESC
+                    """,
+                    (parent_slug,),
+                )
+                rows = await cur.fetchall()
+                return [dict(row) for row in rows]
+
+    async def search_knowledge_chunks(
+        self,
+        *,
+        parent_slug: str,
+        kind: str,
+        query_embedding: list[float],
+        top_k: int = 6,
+    ) -> list[dict[str, object]]:
+        if not query_embedding:
+            return []
+        vector_query = _vector_literal(query_embedding)
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    SELECT content, metadata_json,
+                           (1 - (embedding <=> %s::vector)) AS similarity
+                    FROM knowledge_chunks
+                    WHERE parent_slug=%s AND kind=%s AND embedding IS NOT NULL
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (vector_query, parent_slug, kind, vector_query, top_k),
+                )
+                rows = await cur.fetchall()
+                return [dict(row) for row in rows]
+
+    async def create_campaign(self, *, parent_slug: str, leads_file: str, sheet_id: str | None) -> str:
+        campaign_id = str(uuid.uuid4())
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO campaigns(id, parent_slug, leads_file, sheet_id, status)
+                    VALUES (%s, %s, %s, %s, 'RUNNING')
+                    """,
+                    (campaign_id, parent_slug, leads_file, sheet_id),
+                )
+            await conn.commit()
+        return campaign_id
+
+    async def finalize_campaign(self, campaign_id: str, summary: CampaignSummary) -> None:
+        summary_json = json.dumps(asdict(summary), ensure_ascii=False)
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    UPDATE campaigns
+                    SET status=%s, finished_at=NOW(), summary_json=%s::jsonb
+                    WHERE id=%s
+                    """,
+                    (summary.status, summary_json, campaign_id),
+                )
+            await conn.commit()
+
+    async def insert_campaign_company_result(
+        self,
+        result: CampaignCompanyResult,
+        *,
+        extra_payload: dict[str, object] | None = None,
+    ) -> str:
+        record_id = str(uuid.uuid4())
+        payload_dict = {
+            "company": asdict(result.company),
+            "contact": asdict(result.contact) if result.contact else None,
+            "dossier": {
+                **asdict(result.dossier),
+                "news_items": [asdict(item) for item in result.dossier.news_items],
+            },
+            "variants": [asdict(item) for item in result.variants],
+            "recommended_variant": result.recommended_variant,
+            "sequence_result": asdict(result.sequence_result) if result.sequence_result else None,
+            "research_dossier": asdict(result.research_dossier) if result.research_dossier else None,
+            "instantly_draft": asdict(result.instantly_draft) if result.instantly_draft else None,
+            "approval": asdict(result.approval),
+            "risk_flags": result.risk_flags,
+            "created_at": utc_now_iso(),
+        }
+        if extra_payload:
+            payload_dict.update(extra_payload)
+        payload = json.dumps(
+            payload_dict,
+            ensure_ascii=False,
+        )
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO campaign_company_records(
+                        id, campaign_id, parent_slug, company_key, company_name,
+                        contact_name, contact_title, contact_email, payload_json,
+                        status, reviewer, reviewer_notes, approved_variant
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s::jsonb,
+                        %s, %s, %s, %s
+                    )
+                    """,
+                    (
+                        record_id,
+                        result.campaign_id,
+                        result.parent_slug,
+                        result.company.company_key,
+                        result.company.company_name,
+                        result.contact.full_name if result.contact else None,
+                        result.contact.title if result.contact else None,
+                        result.contact.email if result.contact else None,
+                        payload,
+                        result.approval.status,
+                        result.approval.reviewer,
+                        result.approval.notes,
+                        result.approval.approved_variant,
+                    ),
+                )
+            await conn.commit()
+        return record_id
+
+    async def get_campaign_summary(self, campaign_id: str) -> dict[str, object] | None:
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    SELECT id, parent_slug, leads_file, sheet_id, status,
+                           started_at, finished_at, summary_json
+                    FROM campaigns
+                    WHERE id=%s
+                    """,
+                    (campaign_id,),
+                )
+                row = await cur.fetchone()
+                if not row:
+                    return None
+
+                summary_json = row.get("summary_json")
+                if isinstance(summary_json, str):
+                    summary_json = json.loads(summary_json)
+                out = dict(row)
+                out["summary_json"] = summary_json
+                return out
+
+    async def list_campaign_records(self, campaign_id: str) -> list[dict[str, object]]:
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    SELECT id, parent_slug, company_key, company_name, contact_name,
+                           contact_title, contact_email, status,
+                           reviewer, reviewer_notes, approved_variant,
+                           payload_json, created_at, updated_at
+                    FROM campaign_company_records
+                    WHERE campaign_id=%s
+                    ORDER BY company_name
+                    """,
+                    (campaign_id,),
+                )
+                rows = []
+                for row in await cur.fetchall():
+                    payload = row.get("payload_json")
+                    if isinstance(payload, str):
+                        payload = json.loads(payload)
+                    item = dict(row)
+                    item["payload_json"] = payload
+                    rows.append(item)
+                return rows
+
+    async def purge_expired_campaign_data(self, retention_days: int) -> int:
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    DELETE FROM campaigns
+                    WHERE started_at < (NOW() - (%s::text || ' days')::interval)
+                    """,
+                    (retention_days,),
+                )
+                deleted = cur.rowcount
+            await conn.commit()
+            return deleted

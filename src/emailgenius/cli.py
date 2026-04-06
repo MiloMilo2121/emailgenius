@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
 import json
 import time
 from dataclasses import asdict
 from pathlib import Path
+
+from psycopg_pool import AsyncConnectionPool
 
 from .campaign import campaign_status, export_campaign, run_campaign
 from .config import AppConfig
@@ -14,7 +17,7 @@ from .llm import LLMGateway
 from .pipeline import analyze_company_sync, discover_and_analyze_company_sync, result_to_dict
 from .profiles import load_parent_profile
 from .sheets import publish_campaign_to_sheets
-from .storage import PostgresStore
+from .storage import AsyncPostgresStore, PostgresStore
 from .utils import slugify
 
 
@@ -434,13 +437,22 @@ def main() -> int:
                 print(f"Parent slug not found: {args.slug}")
                 return 1
 
-            result = ingest_knowledge_file(
-                store=store,
-                llm=llm,
-                parent_slug=args.slug,
-                file_path=args.file,
-                kind=args.kind,
-            )
+            async def _run_ingest() -> object:
+                pool = AsyncConnectionPool(conninfo=config.database_url, open=False)
+                await pool.open(wait=True)
+                try:
+                    async_store = AsyncPostgresStore(pool)
+                    return await ingest_knowledge_file(
+                        store=async_store,
+                        llm=llm,
+                        parent_slug=args.slug,
+                        file_path=args.file,
+                        kind=args.kind,
+                    )
+                finally:
+                    await pool.close()
+
+            result = asyncio.run(_run_ingest())
             print(
                 f"Knowledge ingested for {result.parent_slug}: {result.source_path} | "
                 f"chunks={result.chunks_total} | embeddings={result.embeddings_used}"

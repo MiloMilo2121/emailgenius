@@ -7,7 +7,7 @@ from docx import Document
 from pypdf import PdfReader
 
 from .llm import LLMGateway
-from .storage import PostgresStore
+from .storage import AsyncPostgresStore
 from .utils import chunk_text, sha256_of_bytes
 
 
@@ -20,9 +20,9 @@ class KnowledgeIngestResult:
     embeddings_used: bool
 
 
-def ingest_knowledge_file(
+async def ingest_knowledge_file(
     *,
-    store: PostgresStore,
+    store: AsyncPostgresStore,
     llm: LLMGateway,
     parent_slug: str,
     file_path: str,
@@ -34,7 +34,7 @@ def ingest_knowledge_file(
     text = _extract_text(path)
     chunks = chunk_text(text, chunk_size=1300, overlap=220)
 
-    document_id = store.upsert_knowledge_document(
+    document_id = await store.upsert_knowledge_document(
         parent_slug=parent_slug,
         kind=kind,
         source_path=str(path),
@@ -43,7 +43,7 @@ def ingest_knowledge_file(
     )
 
     embeddings = llm.embed_texts(chunks) if chunks else []
-    store.insert_knowledge_chunks(
+    await store.insert_knowledge_chunks(
         document_id=document_id,
         parent_slug=parent_slug,
         kind=kind,

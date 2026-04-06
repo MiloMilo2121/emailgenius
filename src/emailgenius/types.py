@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import BaseModel, Field
 
-@dataclass(slots=True)
-class BrowserSnapshot:
+
+class BrowserSnapshot(BaseModel):
     url: str
     title: str
     text_excerpt: str
@@ -13,27 +13,24 @@ class BrowserSnapshot:
     links: list[str]
 
 
-@dataclass(slots=True)
-class CompanySignals:
+class CompanySignals(BaseModel):
     facility_reduction_pct: float | None = None
     process_reduction_pct: float | None = None
     has_esg_report: bool = False
     has_industry40_signals: bool = False
-    sector_tags: list[str] = field(default_factory=list)
-    evidence: list[str] = field(default_factory=list)
+    sector_tags: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
 
 
-@dataclass(slots=True)
-class EligibilityResult:
+class EligibilityResult(BaseModel):
     eligible: bool
     estimated_credit_rate: int | None
     trigger: str | None
     confidence: float
-    rationale: list[str] = field(default_factory=list)
+    rationale: list[str] = Field(default_factory=list)
 
 
-@dataclass(slots=True)
-class SearchHit:
+class SearchHit(BaseModel):
     title: str
     url: str
     snippet: str = ""
@@ -43,8 +40,7 @@ ALLOWED_RESEARCH_SOURCES = ("web", "instagram", "linkedin")
 DEFAULT_RESEARCH_SOURCES = ("web",)
 
 
-@dataclass(slots=True)
-class ResearchSource:
+class ResearchSource(BaseModel):
     title: str
     url: str
     snippet: str = ""
@@ -52,17 +48,15 @@ class ResearchSource:
     published_at: str | None = None
 
 
-@dataclass(slots=True)
-class DiscoveryContext:
+class DiscoveryContext(BaseModel):
     site_query: str
-    site_candidates: list[SearchHit] = field(default_factory=list)
+    site_candidates: list[SearchHit] = Field(default_factory=list)
     selected_site: SearchHit | None = None
     news_query: str = ""
-    news_results: list[SearchHit] = field(default_factory=list)
+    news_results: list[SearchHit] = Field(default_factory=list)
 
 
-@dataclass(slots=True)
-class AnalysisResult:
+class AnalysisResult(BaseModel):
     created_at_utc: str
     input_url: str
     company_name: str
@@ -73,18 +67,17 @@ class AnalysisResult:
     discovery: DiscoveryContext | None = None
 
 
-@dataclass(slots=True)
-class ParentProfile:
+class ParentProfile(BaseModel):
     slug: str
     company_name: str
     tone: str
-    offer_catalog: list[str] = field(default_factory=list)
-    icp: list[str] = field(default_factory=list)
-    proof_points: list[str] = field(default_factory=list)
-    objections: list[str] = field(default_factory=list)
+    offer_catalog: list[str] = Field(default_factory=list)
+    icp: list[str] = Field(default_factory=list)
+    proof_points: list[str] = Field(default_factory=list)
+    objections: list[str] = Field(default_factory=list)
     cta_policy: str = "call conoscitiva 20-30 min"
-    no_go_claims: list[str] = field(default_factory=list)
-    compliance_notes: list[str] = field(default_factory=list)
+    no_go_claims: list[str] = Field(default_factory=list)
+    compliance_notes: list[str] = Field(default_factory=list)
     sender_name: str = ""
     sender_company: str | None = None
     sender_phone: str | None = None
@@ -94,8 +87,7 @@ class ParentProfile:
     instantly_cta_template: str = ""
 
 
-@dataclass(slots=True)
-class LeadCompany:
+class LeadCompany(BaseModel):
     company_key: str
     company_name: str
     website: str | None
@@ -106,11 +98,10 @@ class LeadCompany:
     keywords: str | None
     tech: str | None
     founded_year: int | None
-    evidence: list[str] = field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
 
 
-@dataclass(slots=True)
-class LeadContact:
+class LeadContact(BaseModel):
     full_name: str
     title: str | None
     seniority: str | None
@@ -119,58 +110,53 @@ class LeadContact:
     quality_flag: str | None
     score: float
     is_primary_contact: bool = False
-    raw: dict[str, str] = field(default_factory=dict)
+    raw: dict[str, str] = Field(default_factory=dict)
 
 
-@dataclass(slots=True)
-class EnrichmentDossier:
+class EnrichmentDossier(BaseModel):
     site_summary: str
-    news_items: list[SearchHit] = field(default_factory=list)
+    news_items: list[SearchHit] = Field(default_factory=list)
     linkedin_public_summary: str = ""
-    pain_hypotheses: list[str] = field(default_factory=list)
-    opportunity_hypotheses: list[str] = field(default_factory=list)
-    evidence: list[str] = field(default_factory=list)
-    sources: list[str] = field(default_factory=list)
+    pain_hypotheses: list[str] = Field(default_factory=list)
+    opportunity_hypotheses: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
 
 
-@dataclass(slots=True)
-class DraftEmailVariant:
+class DraftEmailVariant(BaseModel):
     variant: str
     subject: str
     body: str
     cta: str
-    risk_flags: list[str] = field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
     confidence: float = 0.0
 
 
-@dataclass(slots=True)
-class ResearchDossier:
+class ResearchDossier(BaseModel):
     company_name: str
     domain: str | None = None
     company_summary: str = ""
     trigger_event: str = ""
     pain_hypothesis: str = ""
     personalization_angle: str = ""
-    key_facts: list[str] = field(default_factory=list)
-    recent_news: list[ResearchSource] = field(default_factory=list)
-    citations: list[str] = field(default_factory=list)
-    research_sources: list[str] = field(default_factory=list)
+    key_facts: list[str] = Field(default_factory=list)
+    recent_news: list[ResearchSource] = Field(default_factory=list)
+    citations: list[str] = Field(default_factory=list)
+    research_sources: list[str] = Field(default_factory=list)
     confidence: float = 0.0
 
 
-@dataclass(slots=True)
-class InstantlyDraft:
+class InstantlyDraft(BaseModel):
     subject_line: str
     personalization: str
     intro_line: str
     cta_line: str
     body_template: str
     confidence: float = 0.0
-    risk_flags: list[str] = field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
 
 
-@dataclass(slots=True)
-class ApprovalRecord:
+class ApprovalRecord(BaseModel):
     status: str
     reviewer: str | None = None
     notes: str | None = None
@@ -178,27 +164,24 @@ class ApprovalRecord:
     updated_at: str | None = None
 
 
-@dataclass(slots=True)
-class SequenceStep:
+class SequenceStep(BaseModel):
     step_id: str
     subject: str
     body: str
     goal: str
-    risk_flags: list[str] = field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
     confidence: float = 0.0
 
 
-@dataclass(slots=True)
-class SequenceResult:
+class SequenceResult(BaseModel):
     attack_angle: str
-    trigger_facts: list[str] = field(default_factory=list)
-    steps: list[SequenceStep] = field(default_factory=list)
+    trigger_facts: list[str] = Field(default_factory=list)
+    steps: list[SequenceStep] = Field(default_factory=list)
     recommended_next_step: str | None = None
-    global_risk_flags: list[str] = field(default_factory=list)
+    global_risk_flags: list[str] = Field(default_factory=list)
 
 
-@dataclass(slots=True)
-class CampaignCompanyResult:
+class CampaignCompanyResult(BaseModel):
     campaign_id: str
     parent_slug: str
     company: LeadCompany
@@ -210,11 +193,10 @@ class CampaignCompanyResult:
     sequence_result: SequenceResult | None = None
     research_dossier: ResearchDossier | None = None
     instantly_draft: InstantlyDraft | None = None
-    risk_flags: list[str] = field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
 
 
-@dataclass(slots=True)
-class CampaignSummary:
+class CampaignSummary(BaseModel):
     campaign_id: str
     parent_slug: str
     leads_file: str
@@ -236,7 +218,7 @@ class CampaignSummary:
     rows_failed: int = 0
     estimated_cost_eur: float = 0.0
     actual_cost_eur: float = 0.0
-    research_sources: list[str] = field(default_factory=list)
+    research_sources: list[str] = Field(default_factory=list)
 
 
 JsonDict = dict[str, Any]
