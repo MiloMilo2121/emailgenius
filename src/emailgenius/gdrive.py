@@ -95,7 +95,7 @@ def build_workspace_clients(*, service_account_json: str | None, interactive: bo
     )
     drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
     docs = build("docs", "v1", credentials=credentials, cache_discovery=False)
-    sheets = gspread.authorize(credentials)
+    sheets = gspread.Client(auth=credentials)
     return WorkspaceClients(drive=drive, docs=docs, sheets=sheets)
 
 
@@ -259,15 +259,33 @@ def _sync_knowledge_folder(
                 import asyncio
                 from psycopg_pool import AsyncConnectionPool
                 from .storage import AsyncPostgresStore
-                async def _do_ingest():
-                    pool = AsyncConnectionPool(conninfo=store._dsn, open=False)
-                    await pool.open(wait=True)
+                def _do_ingest_sync():
+                    async def _run():
+                        pool = AsyncConnectionPool(conninfo=store._dsn, open=False)
+                        await pool.open(wait=True)
+                        try:
+                            async_store = AsyncPostgresStore(pool)
+                            await ingest_knowledge_file(
+                                store=async_store, 
+                                llm=llm, 
+                                parent_slug=resolved_parent_slug, 
+                                file_path=str(local_path), 
+                                kind="marketing"
+                            )
+                        finally:
+                            await pool.close()
                     try:
-                        async_store = AsyncPostgresStore(pool)
-                        await ingest_knowledge_file(store=async_store, llm=llm, parent_slug=resolved_parent_slug, file_path=str(local_path), kind="marketing")
-                    finally:
-                        await pool.close()
-                asyncio.run(_do_ingest())
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        loop = None
+                    if loop and loop.is_running():
+                        import threading
+                        thread = threading.Thread(target=lambda: asyncio.run(_run()))
+                        thread.start()
+                        thread.join()
+                    else:
+                        asyncio.run(_run())
+                _do_ingest_sync()
             if processed_folder_id:
                 _move_file_to_folder(drive_client, file_id=file_id, target_folder_id=processed_folder_id)
             store.upsert_drive_file_sync_state(
@@ -341,12 +359,12 @@ def _fetch_leads_from_folder(
         modified_time = str(item.get("modifiedTime") or "")
 
         try:
-            spreadsheet = sheets_client.open_by_key(sheet_id)
+            spreadsheet = _execute_with_backoff(lambda: sheets_client.open_by_key(sheet_id))
         except Exception:
             continue
 
-        for worksheet in spreadsheet.worksheets():
-            values = worksheet.get_all_values()
+        for worksheet in _execute_with_backoff(lambda: spreadsheet.worksheets()):
+            values = _execute_with_backoff(lambda: worksheet.get_all_values())
             if not values:
                 continue
             headers = [str(value or "").strip() for value in values[0]]
@@ -465,9 +483,19 @@ def _execute_with_backoff(callable_fn: Callable[[], Any], *, max_attempts: int =
     while True:
         try:
             return callable_fn()
-        except HttpError as exc:
-            status = int(getattr(exc, "status_code", 0) or getattr(getattr(exc, "resp", None), "status", 0) or 0)
-            retryable = status in {429, 500, 502, 503, 504}
+        except Exception as exc:
+            retryable = False
+            if type(exc).__name__ == "HttpError":
+                status = int(getattr(exc, "status_code", 0) or getattr(getattr(exc, "resp", None), "status", 0) or 0)
+                retryable = status in {429, 500, 502, 503, 504}
+            elif type(exc).__name__ == "APIError":
+                # gspread APIError
+                try:
+                    status = exc.response.status_code
+                    retryable = status in {429, 500, 502, 503, 504}
+                except Exception:
+                    retryable = False
+
             if not retryable or attempt >= max_attempts - 1:
                 raise
             delay = min(8.0, (2 ** attempt) + random.random())
@@ -755,9 +783,9 @@ def _open_or_create_master_status_sheet(*, drive_client: Any, sheets_client: gsp
     if isinstance(files, list) and files:
         first = files[0]
         if isinstance(first, dict):
-            return sheets_client.open_by_key(str(first.get("id") or ""))
+            return _execute_with_backoff(lambda: sheets_client.open_by_key(str(first.get("id") or "")))
 
-    spreadsheet = sheets_client.create(status_name)
+    spreadsheet = _execute_with_backoff(lambda: sheets_client.create(status_name))
     _move_file_to_folder(drive_client, file_id=spreadsheet.id, target_folder_id=parent_folder_id)
     return spreadsheet
 

@@ -6,6 +6,8 @@ import re
 from urllib.parse import urlparse
 
 from duckduckgo_search import DDGS
+from duckduckgo_search.exceptions import DuckDuckGoSearchException
+
 from tavily import TavilyClient
 from .types import SearchHit
 
@@ -145,17 +147,19 @@ def _map_ddg_hits(raw_results: object, *, max_results: int) -> list[SearchHit]:
 
 
 def search_news_web(query: str, *, max_results: int = 8, timeout_s: int = DEFAULT_TIMEOUT_S) -> list[SearchHit]:
-    del timeout_s
     try:
         client = _get_tavily_client()
         payload = client.search(query=query, max_results=max_results, search_depth="basic")
         hits = _map_tavily_hits(payload.get("results"), max_results=max_results)
     except Exception:
-        logger.warning("Tavily failed, falling back to DDG for news search...", exc_info=True)
+        logger.warning("Tavily failed, falling back to DDG for news search...", exc_info=False)
         try:
-            hits = _map_ddg_hits(list(DDGS().news(query, max_results=max_results)), max_results=max_results)
-        except Exception:
-            logger.warning("DDG news fallback failed for query: %s", query, exc_info=True)
+            hits = _map_ddg_hits(list(DDGS(timeout=timeout_s).news(query, max_results=max_results)), max_results=max_results)
+        except Exception as exc:
+            if "RatelimitException" in str(type(exc)) or "Ratelimit" in str(exc):
+                logger.warning("DDG news fallback rate limited for query: %s", query)
+            else:
+                logger.warning("DDG news fallback failed for query: %s", query, exc_info=True)
             hits = []
 
     filtered: list[SearchHit] = []
@@ -168,17 +172,19 @@ def search_news_web(query: str, *, max_results: int = 8, timeout_s: int = DEFAUL
 
 
 def search_web(query: str, *, max_results: int = 8, timeout_s: int = DEFAULT_TIMEOUT_S) -> list[SearchHit]:
-    del timeout_s
     try:
         client = _get_tavily_client()
         payload = client.search(query=query, max_results=max_results, search_depth="basic")
         return _map_tavily_hits(payload.get("results"), max_results=max_results)
     except Exception:
-        logger.warning("Tavily failed, falling back to DDG for web search...", exc_info=True)
+        logger.warning("Tavily failed, falling back to DDG for web search...", exc_info=False)
         try:
-            return _map_ddg_hits(list(DDGS().text(query, max_results=max_results)), max_results=max_results)
-        except Exception:
-            logger.warning("DDG web fallback failed for query: %s", query, exc_info=True)
+            return _map_ddg_hits(list(DDGS(timeout=timeout_s).text(query, max_results=max_results)), max_results=max_results)
+        except Exception as exc:
+            if "RatelimitException" in str(type(exc)) or "Ratelimit" in str(exc):
+                logger.warning("DDG web fallback rate limited for query: %s", query)
+            else:
+                logger.warning("DDG web fallback failed for query: %s", query, exc_info=True)
             return []
 
 

@@ -232,6 +232,21 @@ def run_campaign(
         groups = group_rows_by_company(valid_rows)
         for company_rows in groups.values():
             raw_row = _pick_raw_row_for_company(preflight.rows, company_rows[0])
+            if not raw_row:
+                export_rows.append(
+                    _error_row(
+                        campaign_id=campaign_id,
+                        parent_slug=parent_slug,
+                        raw_row=company_rows[0],
+                        error_code="RAW_ROW_MISSING",
+                        warning_message="Impossibile trovare il dato sorgente per questa azienda",
+                        output_schema=output_schema,
+                    )
+                )
+                warnings_total += 1
+                rows_failed += 1
+                continue
+
             outcome = _process_company_like_item(
                 campaign_id=campaign_id,
                 parent_slug=parent_slug,
@@ -422,7 +437,18 @@ def _run_campaign_drive_mode(
     knowledge_report = sync_knowledge_base(workspace_folder_id, store, llm, clients.drive, parent_slug=parent_slug)
     lead_rows = fetch_leads_sheet(workspace_folder_id, clients.sheets, clients.drive, parent_slug=parent_slug)
     if not lead_rows:
-        raise ValueError("No lead rows found in Drive folder Input Leads")
+        print("[drive-sync] lead_rows is empty, returning early")
+        return CampaignSummary(
+            campaign_id="",
+            parent_slug=parent_slug,
+            leads_file=f"drive://{workspace_folder_id}/Input Leads",
+            sheet_id=sheet_id,
+            status="COMPLETED",
+            companies_total=0,
+            generated_total=0,
+            warnings_total=0,
+            cost_eur=0.0,
+        ), Path(out_dir) / "campaign-empty.csv", []
 
     llm_items_planned = len({item.idempotency_key for item in lead_rows})
     estimated_cost_eur = _estimate_cost_eur(llm_items_planned)
@@ -651,8 +677,13 @@ def _run_campaign_drive_mode(
     out_base = Path(out_dir)
     out_base.mkdir(parents=True, exist_ok=True)
     export_path = out_base / f"campaign-{campaign_id}.csv"
+    
+    base_cols = ["idempotency_key", "sequence_steps", "attack_angle"]
+    if lead_rows:
+        base_cols = list(lead_rows[0].raw_row.keys()) + base_cols
+        
     columns = _merge_columns(
-        list(lead_rows[0].raw_row.keys()) + ["idempotency_key", "sequence_steps", "attack_angle"],
+        base_cols,
         approval_columns(output_schema),
     )
     write_csv(export_path, export_rows, columns)
@@ -974,10 +1005,18 @@ def _run_row_mode(
     workers = max(1, int(max_concurrency))
     total = len(valid_rows)
     done = 0
+    # Bug 12: Add concurrency limits / rate limiting semaphore
+    import threading
+    llm_semaphore = threading.Semaphore(workers)
+    
+    def _worker_wrapper(**kwargs):
+        with llm_semaphore:
+            return _process_company_like_item(**kwargs)
+            
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
             executor.submit(
-                _process_company_like_item,
+                _worker_wrapper,
                 campaign_id=campaign_id,
                 parent_slug=parent_slug,
                 parent=parent,
@@ -1500,14 +1539,15 @@ def _build_retrieval_query(*, company, dossier) -> str:
     return " | ".join(part for part in hints if part)
 
 
-def _pick_raw_row_for_company(preflight_rows, company_row: dict[str, str]) -> dict[str, str]:
+def _pick_raw_row_for_company(preflight_rows, company_row: dict[str, str]) -> dict[str, str] | None:
     company_name = (company_row.get("Company Name") or "").strip().lower()
     for item in preflight_rows:
         if not item.is_valid:
             continue
         if (item.row.get("Company Name") or "").strip().lower() == company_name:
             return item.raw_row
-    return {}
+    print(f"[warning] No raw row found for company row: {company_row}")
+    return None
 
 
 def _split_contact_name(value: str) -> tuple[str, str]:

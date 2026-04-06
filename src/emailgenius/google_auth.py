@@ -76,7 +76,15 @@ def resolve_google_credentials(
     resolved_scopes = list(scopes or DEFAULT_GOOGLE_SCOPES)
 
     if service_account_json:
-        return ServiceAccountCredentials.from_service_account_file(service_account_json, scopes=resolved_scopes)
+        import json
+        service_account_json = service_account_json.strip()
+        try:
+            if service_account_json.startswith("{"):
+                info = json.loads(service_account_json)
+                return ServiceAccountCredentials.from_service_account_info(info, scopes=resolved_scopes)
+            return ServiceAccountCredentials.from_service_account_file(service_account_json, scopes=resolved_scopes)
+        except Exception as e:
+            raise ValueError(f"Invalid GOOGLE_SERVICE_ACCOUNT_JSON value: {e}")
 
     token_path = oauth_token_path()
     creds = _load_oauth_credentials(token_path, resolved_scopes)

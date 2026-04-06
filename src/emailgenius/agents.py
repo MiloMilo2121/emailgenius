@@ -123,7 +123,8 @@ class CampaignAgentEngine:
         }
 
         state = self._strategist_node(state)
-        while True:
+        state = self._strategist_node(state)
+        for attempt in range(self._max_compliance_retries + 1):
             state = self._icebreaker_writer_node(state)
             state = self._followup_writer_node(state)
             state = self._compliance_guard_node(state)
@@ -132,6 +133,10 @@ class CampaignAgentEngine:
         return state
 
     def _strategist_node(self, state: dict[str, Any]) -> dict[str, Any]:
+        """
+        Determines the strategic attack angle. Uses an LLM to evaluate the dossier 
+        and extracts an insightful attack angle for the outbound campaign.
+        """
         dossier: EnrichmentDossier = state["dossier"]
         company: LeadCompany = state["company"]
 
@@ -144,10 +149,27 @@ class CampaignAgentEngine:
         if company.industry:
             trigger_facts.append(f"Settore: {company.industry}")
 
+        prompt_payload = {
+            "company": company.model_dump(),
+            "trigger_facts": trigger_facts[:3],
+            "goal": "Definire il miglior angolo di attacco (attack angle) per una email a freddo.",
+        }
+
+        # Utilize the writer LLM to synthesize an attack angle based on the dossier insights
+        parsed = self._safe_llm_json(
+            system_prompt=(
+                "Analizza l'azienda target e i fatti a disposizione. "
+                "Output SOLO JSON con chiave: attack_angle (stringa, max 15 parole, esplicativo dell'approccio)."
+            ),
+            payload=prompt_payload,
+            llm_policy=str(state.get("llm_policy") or "strict"),
+        )
+        
+        fallback_angle = "Outreach consultivo con ipotesi operativa"
         if trigger_facts:
-            attack_angle = "Trigger-based outreach su evento recente con impatto operativo"
-        else:
-            attack_angle = "Outreach consultivo con ipotesi operativa"
+            fallback_angle = "Trigger-based outreach su evento recente con impatto operativo"
+
+        attack_angle = str(parsed.get("attack_angle") or fallback_angle)
 
         state["attack_angle"] = attack_angle
         state["trigger_facts"] = trigger_facts[:3]
@@ -163,8 +185,8 @@ class CampaignAgentEngine:
         default_body = format_email_body(render_seed_template(parent, company, contact))
 
         prompt_payload = {
-            "company": asdict(company),
-            "contact": asdict(contact) if contact else None,
+            "company": company.model_dump(),
+            "contact": contact.model_dump() if contact else None,
             "attack_angle": state.get("attack_angle") or "",
             "trigger_facts": trigger_facts,
             "goal": "Aprire la conversazione con una prima riga iper-personalizzata sul trigger.",
@@ -215,11 +237,11 @@ class CampaignAgentEngine:
         e1 = next((item for item in existing_steps if item.step_id == "E1"), None)
 
         prompt_payload = {
-            "company": asdict(company),
-            "contact": asdict(contact) if contact else None,
+            "company": company.model_dump(),
+            "contact": contact.model_dump() if contact else None,
             "attack_angle": state.get("attack_angle") or "",
             "trigger_facts": trigger_facts,
-            "email1": asdict(e1) if e1 else None,
+            "email1": e1.model_dump() if e1 else None,
             "retrieved_snippets": snippets[:8],
             "constraints": {
                 "language": "italiano",

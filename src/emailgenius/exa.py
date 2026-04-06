@@ -16,6 +16,8 @@ _EXA_SEARCH_URL = "https://api.exa.ai/search"
 class ExaClient:
     def __init__(self, api_key: str | None) -> None:
         self._api_key = (api_key or "").strip()
+        if not self._api_key:
+            print("[warning] EXA_API_KEY is not configured. ExaClient will return empty results.")
 
     @property
     def configured(self) -> bool:
@@ -137,21 +139,28 @@ class ExaClient:
         }
 
     def _post_json(self, url: str, payload: dict[str, object]) -> dict[str, object]:
-        body = json.dumps(payload).encode("utf-8")
-        request = Request(
-            url,
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": self._api_key,
-                "User-Agent": "EmailGenius/0.1",
-            },
-            method="POST",
-        )
+        if not self._api_key:
+            return {}
+
         try:
-            with urlopen(request, timeout=25) as response:
-                raw = response.read().decode("utf-8", errors="ignore")
-        except (HTTPError, URLError) as exc:
+            import httpx
+            with httpx.Client(timeout=25.0) as client:
+                with client.stream(
+                    "POST",
+                    url,
+                    json=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-api-key": self._api_key,
+                        "User-Agent": "EmailGenius/0.1",
+                    },
+                ) as response:
+                    response.raise_for_status()
+                    buffers = []
+                    for chunk in response.iter_bytes():
+                        buffers.append(chunk)
+                    raw = b"".join(buffers).decode("utf-8", errors="ignore")
+        except Exception as exc:
             raise RuntimeError(f"Exa request failed: {exc}") from exc
 
         try:

@@ -186,27 +186,28 @@ class LLMGateway:
         self._writer_fallback_model = (writer_fallback_model or fallback_chat_model or self._writer_model).strip()
         self._chat_timeout_s = 90.0
         self._embedding_timeout_s = 45.0
-        self._embedding_client = self._build_client(api_key=api_key, base_url=api_base_url)
-        self._chat_targets: list[tuple[Any, str]] = []
+        self._primary_client = self._build_client(api_key=api_key, base_url=api_base_url)
         self._research_targets: list[tuple[Any, str]] = []
         self._writer_targets: list[tuple[Any, str]] = []
-        if self._embedding_client is not None:
-            self._chat_targets.append((self._embedding_client, self._writer_model))
-            self._research_targets.append((self._embedding_client, self._research_model))
-            self._writer_targets.append((self._embedding_client, self._writer_model))
+        if self._primary_client is not None:
+            self._research_targets.append((self._primary_client, self._research_model))
+            self._writer_targets.append((self._primary_client, self._writer_model))
             if self._writer_fallback_model and self._writer_fallback_model != self._writer_model:
-                self._writer_targets.append((self._embedding_client, self._writer_fallback_model))
+                self._writer_targets.append((self._primary_client, self._writer_fallback_model))
 
         resolved_fallback_model = (fallback_chat_model or chat_model).strip()
         fallback_client = self._build_client(api_key=fallback_api_key, base_url=fallback_api_base_url)
         if fallback_client is not None and resolved_fallback_model:
             same_key = (api_key or "").strip() == (fallback_api_key or "").strip()
             same_base_url = (api_base_url or "").strip() == (fallback_api_base_url or "").strip()
-            same_model = resolved_fallback_model == chat_model
-            if not (same_key and same_base_url and same_model):
-                self._chat_targets.append((fallback_client, self._writer_fallback_model or resolved_fallback_model))
-                self._research_targets.append((fallback_client, self._research_model or resolved_fallback_model))
-                self._writer_targets.append((fallback_client, self._writer_fallback_model or resolved_fallback_model))
+            # If the fallback client is structurally different, append to writer targets.
+            if not (same_key and same_base_url) or resolved_fallback_model != self._writer_model:
+                # To prevent Bug 5, make sure we only push if the target pair hasn't been pushed already
+                if (fallback_client, resolved_fallback_model) not in self._writer_targets:
+                    self._writer_targets.append((fallback_client, resolved_fallback_model))
+            if not (same_key and same_base_url) or resolved_fallback_model != self._research_model:
+                if (fallback_client, resolved_fallback_model) not in self._research_targets:
+                    self._research_targets.append((fallback_client, resolved_fallback_model))
 
     def _build_client(self, *, api_key: str | None, base_url: str | None) -> Any | None:
         key = (api_key or "").strip()
@@ -232,15 +233,19 @@ class LLMGateway:
 
     @retry(wait=wait_exponential(min=1, max=10), stop=stop_after_attempt(3), reraise=True)
     def _call_chat_api(self, *, client: Any, model: str, system_prompt: str, user_prompt: str) -> Any:
-        return client.chat.completions.create(
-            model=model,
-            response_format={"type": "json_object"},
-            messages=[
+        # Bug 6: Do not send response_format to Anthropic or certain models that crash with it
+        kwargs = {
+            "model": model,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            timeout=self._chat_timeout_s,
-        )
+            "timeout": self._chat_timeout_s,
+        }
+        if "anthropic/" not in model.lower() and "claude" not in model.lower():
+            kwargs["response_format"] = {"type": "json_object"}
+            
+        return client.chat.completions.create(**kwargs)
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
@@ -249,12 +254,12 @@ class LLMGateway:
         embed_model = (self._embedding_model or "").strip()
         if embed_model.lower() in {"", "hash", "local", "none", "disabled", "hash-local"}:
             return [_hash_embedding(text) for text in texts]
-        if self._embedding_client is None:
+        if self._primary_client is None:
             return [_hash_embedding(text) for text in texts]
 
         try:
             response = self._call_embeddings_api(
-                client=self._embedding_client,
+                client=self._primary_client,
                 model=embed_model,
                 texts=texts,
             )
@@ -278,7 +283,7 @@ class LLMGateway:
         requested_variants = _variant_names_for_mode(variant_mode)
         rewrite_targets = _rewrite_targets_for_variants(requested_variants)
         real_insights = _extract_real_insights(company, dossier)
-        if not self._chat_targets:
+        if not self._writer_targets:
             if llm_policy == "strict":
                 raise RuntimeError("LLM unavailable: configure OPENAI_API_KEY or set --llm-policy fallback")
             return _fallback_variants(
@@ -291,12 +296,12 @@ class LLMGateway:
             )
 
         payload = {
-            "parent_profile": asdict(parent),
-            "target_company": asdict(company),
-            "target_contact": asdict(contact) if contact else None,
+            "parent_profile": parent.model_dump(),
+            "target_company": company.model_dump(),
+            "target_contact": contact.model_dump() if contact else None,
             "dossier": {
-                **asdict(dossier),
-                "news_items": [asdict(item) for item in dossier.news_items],
+                **dossier.model_dump(),
+                "news_items": [item.model_dump() for item in dossier.news_items],
             },
             "real_personalization_insights": [
                 {"fact": fact, "meaning": meaning}
@@ -538,7 +543,14 @@ class LLMGateway:
 
     def _call_chat_json(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
         return self._call_chat_json_targets(
-            targets=self._chat_targets,
+            targets=self._writer_targets,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        
+    def _call_research_json(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        return self._call_chat_json_targets(
+            targets=self._research_targets,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
         )
@@ -603,8 +615,8 @@ class LLMGateway:
                 "proof_points": parent.proof_points,
                 "icp": parent.icp,
             },
-            "company": asdict(company),
-            "contact": asdict(contact) if contact else None,
+            "company": company.model_dump(),
+            "contact": contact.model_dump() if contact else None,
             "research_bundle": research_bundle,
             "output_schema": {
                 "company_summary": "string",
@@ -681,9 +693,9 @@ class LLMGateway:
                 "proof_points": parent.proof_points,
                 "no_go_claims": parent.no_go_claims,
             },
-            "company": asdict(company),
-            "contact": asdict(contact) if contact else None,
-            "research_dossier": asdict(research_dossier),
+            "company": company.model_dump(),
+            "contact": contact.model_dump() if contact else None,
+            "research_dossier": research_dossier.model_dump(),
             "fixed_intro": intro_line,
             "fixed_cta": cta_line,
             "rules": {
@@ -734,7 +746,7 @@ class LLMGateway:
         rewrite_targets: dict[str, tuple[float, float]],
         quality_flags: list[str],
     ) -> tuple[str, str] | None:
-        if not self._chat_targets:
+        if not self._writer_targets:
             return None
         min_rewrite, max_rewrite = rewrite_targets.get(variant_name.upper(), (0.25, 0.40))
 

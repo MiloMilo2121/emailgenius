@@ -54,8 +54,18 @@ def create_app(
     llm_factory: Callable[[], LLMGateway] | None = None,
 ) -> FastAPI:
     resolved_config = config or AppConfig.from_env()
-    resolved_store_factory = store_factory or (lambda: store or _store_from_config(resolved_config))
-    resolved_llm_factory = llm_factory or (lambda: llm or _llm_from_config(resolved_config))
+    
+    if store_factory:
+        resolved_store_factory = store_factory
+    else:
+        global_store = store or _store_from_config(resolved_config)
+        resolved_store_factory = lambda: global_store
+        
+    if llm_factory:
+        resolved_llm_factory = llm_factory
+    else:
+        global_llm = llm or _llm_from_config(resolved_config)
+        resolved_llm_factory = lambda: global_llm
 
     templates_dir = Path(__file__).with_name("templates")
     static_dir = Path(__file__).with_name("static")
@@ -247,6 +257,11 @@ def create_app(
         resolved_research_sources = list(research_sources or ["web"])
         uploads_dir = app_home() / "web-uploads" / "csv"
         uploads_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Bug 22: Controllo dimensione upload_file (>5MB error) CSV parsing
+        if leads_file.size and leads_file.size > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Il file CSV supera il limite di 5MB")
+            
         suffix = Path(leads_file.filename or "leads.csv").suffix or ".csv"
         local_path = uploads_dir / f"{uuid.uuid4().hex}{suffix}"
         with local_path.open("wb") as handle:
@@ -478,18 +493,23 @@ def _launch_background_job(
 
     def runner() -> None:
         registry.mark_running(job_id)
+        completed = False
         try:
             campaign_id, export_path = job_fn(app=app, **kwargs)
+            registry.mark_completed(
+                job_id,
+                message="Operazione completata.",
+                campaign_id=campaign_id,
+                export_path=export_path,
+            )
+            completed = True
         except Exception as exc:
             error_text = f"{exc}\n\n{traceback.format_exc(limit=6)}"
             registry.mark_failed(job_id, error=error_text[:3000])
-            return
-        registry.mark_completed(
-            job_id,
-            message="Operazione completata.",
-            campaign_id=campaign_id,
-            export_path=export_path,
-        )
+            completed = True
+        finally:
+            if not completed:
+                registry.mark_failed(job_id, error="Il thread è terminato in modo anomalo")
 
     threading.Thread(target=runner, name=f"emailgenius-job-{job_id}", daemon=True).start()
 

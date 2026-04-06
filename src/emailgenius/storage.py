@@ -8,7 +8,7 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
-from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import AsyncConnectionPool, ConnectionPool
 
 from .profiles import parent_profile_from_dict, parent_profile_to_dict
 from .types import CampaignCompanyResult, CampaignSummary, ParentProfile
@@ -16,11 +16,18 @@ from .utils import utc_now_iso
 
 
 class PostgresStore:
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, pool: ConnectionPool | None = None) -> None:
         self._dsn = dsn
+        if pool is None:
+            self._pool = ConnectionPool(
+                dsn, kwargs={"autocommit": True, "row_factory": dict_row}, min_size=1, max_size=20
+            )
+        else:
+            self._pool = pool
 
-    def _connect(self) -> psycopg.Connection[Any]:
-        return psycopg.connect(self._dsn, autocommit=True, row_factory=dict_row)
+    def _connect(self) -> Any:
+        # returns a context manager that provides a connection
+        return self._pool.connection()
 
     def migrate(self) -> None:
         ddl = [
@@ -152,10 +159,15 @@ class PostgresStore:
             ON drive_row_ingestions(status, updated_at DESC)
             """,
         ]
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                for stmt in ddl:
-                    cur.execute(stmt)
+        try:
+            with self._connect() as conn:
+                with conn.transaction():
+                    with conn.cursor() as cur:
+                        for stmt in ddl:
+                            cur.execute(stmt)
+        except Exception as e:
+            print(f"[migrate] Core schema migration failed: {e}")
+            raise
         self._setup_langgraph_checkpoint_schema()
 
     def upsert_parent_profile(self, profile: ParentProfile, *, set_active: bool = False) -> None:
@@ -680,19 +692,27 @@ class PostgresStore:
 
     def _setup_langgraph_checkpoint_schema(self) -> None:
         try:
-            from langgraph.checkpoint.postgres import PostgresSaver
+            from langgraph.checkpoint.postgres import PostgresSaver # type: ignore
         except Exception:
             return
+        
+        saver = None
         try:
             saver = PostgresSaver.from_conn_string(self._dsn)
             setup = getattr(saver, "setup", None)
             if callable(setup):
                 setup()
-            close = getattr(saver, "close", None)
-            if callable(close):
-                close()
-        except Exception:
-            return
+        except Exception as e:
+            print(f"[warning] Failed to setup LangGraph checkpoint schema: {e}")
+            # Do not return silently if the migration explicitly failed due to an error, log it.
+        finally:
+            if saver:
+                close = getattr(saver, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
 
     def purge_expired_campaign_data(self, retention_days: int) -> int:
         with self._connect() as conn:

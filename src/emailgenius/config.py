@@ -57,12 +57,23 @@ class AppConfig:
         if io_mode not in {"local", "drive"}:
             io_mode = "local"
         openrouter_api_key = _env_or_none("OPENROUTER_API_KEY")
+        openai_api_key = _env_or_none("OPENAI_API_KEY", "EMAILGENIUS_OPENAI_API_KEY", "OPENROUTER_API_KEY")
+        
+        # If the resolved openai API key is from OpenRouter (either extracted directly or visibly prefixed)
+        is_openrouter = openrouter_api_key or (openai_api_key and openai_api_key.startswith("sk-or-"))
         openrouter_base_url = _env_or_none("OPENROUTER_BASE_URL") or (
-            "https://openrouter.ai/api/v1" if openrouter_api_key else None
+            "https://openrouter.ai/api/v1" if is_openrouter else None
         )
+        
+        try:
+            retention_raw = os.getenv("EMAILGENIUS_RETENTION_DAYS", "90").strip()
+            retention_days = int(retention_raw)
+        except ValueError:
+            retention_days = 90
+
         return cls(
             database_url=_default_db_url(),
-            openai_api_key=_env_or_none("OPENAI_API_KEY", "EMAILGENIUS_OPENAI_API_KEY", "OPENROUTER_API_KEY"),
+            openai_api_key=openai_api_key,
             openai_base_url=_env_or_none("OPENAI_BASE_URL", "EMAILGENIUS_OPENAI_BASE_URL", "OPENROUTER_BASE_URL")
             or openrouter_base_url,
             tavily_api_key=_env_or_none("TAVILY_API_KEY"),
@@ -76,7 +87,7 @@ class AppConfig:
             openai_fallback_base_url=_env_or_none("EMAILGENIUS_OPENAI_FALLBACK_BASE_URL"),
             openai_fallback_chat_model=_env_or_none("EMAILGENIUS_OPENAI_FALLBACK_CHAT_MODEL"),
             google_service_account_json=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"),
-            retention_days=int(os.getenv("EMAILGENIUS_RETENTION_DAYS", "90")),
+            retention_days=retention_days,
             workspace_folder_id=_env_or_none("EMAILGENIUS_WORKSPACE_FOLDER_ID"),
             drive_poll_interval_seconds=poll_seconds,
             io_mode=io_mode,
