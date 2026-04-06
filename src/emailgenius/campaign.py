@@ -118,6 +118,7 @@ def run_campaign(
             cost_cap_eur=cost_cap_eur,
             force_cost_override=force_cost_override,
             workspace_folder_id=workspace_folder_id or config.workspace_folder_id,
+            max_concurrency=max_concurrency,
             research_sources=selected_research_sources,
         )
 
@@ -409,6 +410,7 @@ def _run_campaign_drive_mode(
     cost_cap_eur: float,
     force_cost_override: bool,
     workspace_folder_id: str | None,
+    max_concurrency: int = 1,
     research_sources: list[str] | None = None,
 ) -> tuple[CampaignSummary, Path, list[dict[str, object]]]:
     if not workspace_folder_id:
@@ -484,182 +486,199 @@ def _run_campaign_drive_mode(
     export_rows: list[dict[str, object]] = []
     drive_export_items: list[dict[str, object]] = []
 
-    for lead_row in lead_rows:
-        if not store.begin_drive_row_ingestion(
-            idempotency_key=lead_row.idempotency_key,
-            sheet_id=lead_row.sheet_id,
-            tab_name=lead_row.tab_name,
-            row_index=lead_row.row_index,
-            modified_time=lead_row.modified_time,
-            campaign_id=campaign_id,
-        ):
-            continue
+    workers = max(1, min(max_concurrency, 8))
+    semaphore = threading.Semaphore(workers)
+    _lock = threading.Lock()
 
-        row_parent_slug = _resolve_parent_slug_for_drive_row(store=store, row=lead_row, fallback=parent_slug)
-        parent = store.get_parent_profile(row_parent_slug) if row_parent_slug else None
-        if parent is None:
-            warnings_total += 1
-            rows_failed += 1
-            error_row = _error_row(
-                campaign_id=campaign_id,
-                parent_slug=row_parent_slug or parent_slug,
-                raw_row=lead_row.raw_row,
-                error_code="PARENT_PROFILE_NOT_FOUND",
-                warning_message="Parent profile non trovato per la riga Drive.",
-                output_schema=output_schema,
-            )
-            error_row["idempotency_key"] = lead_row.idempotency_key
-            export_rows.append(error_row)
-            store.complete_drive_row_ingestion(
+    def _process_drive_row(lead_row: DriveLeadRow) -> None:
+        nonlocal warnings_total, rows_failed, llm_items_attempted, rows_generated_ok, processed_companies
+        with semaphore:
+            if not store.begin_drive_row_ingestion(
                 idempotency_key=lead_row.idempotency_key,
-                record_id=None,
-                status="FAILED",
-                error_message="Parent profile non trovato",
-            )
-            continue
+                sheet_id=lead_row.sheet_id,
+                tab_name=lead_row.tab_name,
+                row_index=lead_row.row_index,
+                modified_time=lead_row.modified_time,
+                campaign_id=campaign_id,
+            ):
+                return
 
-        company, contacts = build_company_and_contacts([lead_row.canonical_row])
-        primary_contact = select_primary_contact(contacts)
+            row_parent_slug = _resolve_parent_slug_for_drive_row(store=store, row=lead_row, fallback=parent_slug)
+            row_parent = store.get_parent_profile(row_parent_slug) if row_parent_slug else None
+            if row_parent is None:
+                error_row = _error_row(
+                    campaign_id=campaign_id,
+                    parent_slug=row_parent_slug or parent_slug,
+                    raw_row=lead_row.raw_row,
+                    error_code="PARENT_PROFILE_NOT_FOUND",
+                    warning_message="Parent profile non trovato per la riga Drive.",
+                    output_schema=output_schema,
+                )
+                error_row["idempotency_key"] = lead_row.idempotency_key
+                store.complete_drive_row_ingestion(
+                    idempotency_key=lead_row.idempotency_key,
+                    record_id=None,
+                    status="FAILED",
+                    error_message="Parent profile non trovato",
+                )
+                with _lock:
+                    warnings_total += 1
+                    rows_failed += 1
+                    export_rows.append(error_row)
+                return
 
-        try:
-            if company.website and effective_enrichment_mode != "minimal":
-                dossier, discovered_website = build_enrichment_dossier_sync(
+            company, contacts = build_company_and_contacts([lead_row.canonical_row])
+            primary_contact = select_primary_contact(contacts)
+
+            try:
+                if company.website and effective_enrichment_mode != "minimal":
+                    dossier, discovered_website = build_enrichment_dossier_sync(
+                        company=company,
+                        contact=primary_contact,
+                        headless=headless,
+                        max_extra_pages=0,
+                        snapshot_timeout_ms=18000,
+                    )
+                    if discovered_website and not company.website:
+                        company.website = discovered_website
+                else:
+                    dossier = _minimal_dossier(company_name=company.company_name)
+
+                nebula = run_nebula_enrichment_machine(
                     company=company,
                     contact=primary_contact,
-                    headless=headless,
-                    max_extra_pages=0,
-                    snapshot_timeout_ms=18000,
+                    dossier=dossier,
                 )
-                if discovered_website and not company.website:
-                    company.website = discovered_website
-            else:
-                dossier = _minimal_dossier(company_name=company.company_name)
+                snippets = nebula.to_prompt_snippets(limit=10) + memory_snippets
+                if rag_enabled:
+                    retrieval_query = _build_retrieval_query(company=company, dossier=dossier)
+                    retrieval_embeddings = llm.embed_texts([retrieval_query])
+                    if retrieval_embeddings:
+                        search_results = store.search_knowledge_chunks(
+                            parent_slug=row_parent_slug,
+                            kind="marketing",
+                            query_embedding=retrieval_embeddings[0],
+                            top_k=6,
+                        )
+                        snippets.extend(str(item.get("content") or "") for item in search_results if item.get("content"))
+                snippets = _dedupe_snippets(snippets, limit=14)
 
-            nebula = run_nebula_enrichment_machine(
-                company=company,
-                contact=primary_contact,
-                dossier=dossier,
-            )
-            snippets = nebula.to_prompt_snippets(limit=10) + memory_snippets
-            if rag_enabled:
-                retrieval_query = _build_retrieval_query(company=company, dossier=dossier)
-                retrieval_embeddings = llm.embed_texts([retrieval_query])
-                if retrieval_embeddings:
-                    search_results = store.search_knowledge_chunks(
-                        parent_slug=row_parent_slug,
-                        kind="marketing",
-                        query_embedding=retrieval_embeddings[0],
-                        top_k=6,
+                with _lock:
+                    llm_items_attempted += 1
+
+                sequence = engine.generate_sequence(
+                    parent=row_parent,
+                    company=company,
+                    contact=primary_contact,
+                    dossier=dossier,
+                    marketing_snippets=snippets,
+                    llm_policy=llm_policy,
+                )
+                risk_flags = sorted(
+                    set(sequence.global_risk_flags + [flag for step in sequence.steps for flag in step.risk_flags])
+                )
+
+                result = CampaignCompanyResult(
+                    campaign_id=campaign_id,
+                    parent_slug=row_parent_slug,
+                    company=company,
+                    contact=primary_contact,
+                    dossier=dossier,
+                    variants=[],
+                    recommended_variant="",
+                    approval=ApprovalRecord(status="PENDING", updated_at=utc_now_iso()),
+                    sequence_result=sequence,
+                    risk_flags=risk_flags,
+                )
+                selected_step = next((item for item in sequence.steps if item.step_id.upper() == "E1"), None)
+                final_subject = selected_step.subject if selected_step else ""
+                final_body = selected_step.body if selected_step else ""
+                generation_warning = ""
+                if risk_flags:
+                    generation_warning = "; ".join(risk_flags)[:240]
+                    with _lock:
+                        warnings_total += 1
+
+                export_row = dict(lead_row.raw_row)
+                export_row.update(
+                    {
+                        "campaign_id": campaign_id,
+                        "parent_slug": row_parent_slug,
+                        "company_name": company.company_name,
+                        "contact_name": primary_contact.full_name if primary_contact else "",
+                        "contact_title": primary_contact.title if primary_contact else "",
+                        "contact_email": primary_contact.email if primary_contact else "",
+                        "final_subject": final_subject,
+                        "final_body": final_body,
+                        "generation_status": "OK",
+                        "generation_warning": generation_warning,
+                        "error_code": "",
+                        "risk_flags": "; ".join(risk_flags),
+                        "status": "PENDING",
+                        "updated_at": utc_now_iso(),
+                        "idempotency_key": lead_row.idempotency_key,
+                        "sequence_steps": len(sequence.steps),
+                        "attack_angle": sequence.attack_angle,
+                    }
+                )
+                record_id = store.insert_campaign_company_result(
+                    result,
+                    extra_payload={
+                        "raw_row": lead_row.raw_row,
+                        "idempotency_key": lead_row.idempotency_key,
+                        "source_sheet_id": lead_row.sheet_id,
+                        "source_tab_name": lead_row.tab_name,
+                        "source_row_index": lead_row.row_index,
+                        "source_modified_time": lead_row.modified_time,
+                        "generation_status": "OK",
+                        "generation_warning": generation_warning,
+                        "error_code": "",
+                    },
+                )
+                store.complete_drive_row_ingestion(
+                    idempotency_key=lead_row.idempotency_key,
+                    record_id=record_id,
+                    status="COMPLETED",
+                )
+                with _lock:
+                    export_rows.append(export_row)
+                    drive_export_items.append(
+                        {
+                            "idempotency_key": lead_row.idempotency_key,
+                            "parent_slug": row_parent_slug,
+                            "company_name": company.company_name,
+                            "contact_name": primary_contact.full_name if primary_contact else "",
+                            "generation_status": "OK",
+                            "sequence_result": sequence,
+                        }
                     )
-                    snippets.extend(str(item.get("content") or "") for item in search_results if item.get("content"))
-            snippets = _dedupe_snippets(snippets, limit=14)
+                    rows_generated_ok += 1
+                    processed_companies += 1
+            except Exception as exc:
+                error_row = _error_row(
+                    campaign_id=campaign_id,
+                    parent_slug=row_parent_slug,
+                    raw_row=lead_row.raw_row,
+                    error_code="DRIVE_ROW_PROCESSING_FAILED",
+                    warning_message=str(exc),
+                    output_schema=output_schema,
+                )
+                error_row["idempotency_key"] = lead_row.idempotency_key
+                store.complete_drive_row_ingestion(
+                    idempotency_key=lead_row.idempotency_key,
+                    record_id=None,
+                    status="FAILED",
+                    error_message=str(exc)[:500],
+                )
+                with _lock:
+                    rows_failed += 1
+                    warnings_total += 1
+                    export_rows.append(error_row)
 
-            llm_items_attempted += 1
-            sequence = engine.generate_sequence(
-                parent=parent,
-                company=company,
-                contact=primary_contact,
-                dossier=dossier,
-                marketing_snippets=snippets,
-                llm_policy=llm_policy,
-            )
-            risk_flags = sorted(
-                set(sequence.global_risk_flags + [flag for step in sequence.steps for flag in step.risk_flags])
-            )
-
-            result = CampaignCompanyResult(
-                campaign_id=campaign_id,
-                parent_slug=row_parent_slug,
-                company=company,
-                contact=primary_contact,
-                dossier=dossier,
-                variants=[],
-                recommended_variant="",
-                approval=ApprovalRecord(status="PENDING", updated_at=utc_now_iso()),
-                sequence_result=sequence,
-                risk_flags=risk_flags,
-            )
-            selected_step = next((item for item in sequence.steps if item.step_id.upper() == "E1"), None)
-            final_subject = selected_step.subject if selected_step else ""
-            final_body = selected_step.body if selected_step else ""
-            generation_warning = ""
-            if risk_flags:
-                generation_warning = "; ".join(risk_flags)[:240]
-                warnings_total += 1
-
-            export_row = dict(lead_row.raw_row)
-            export_row.update(
-                {
-                    "campaign_id": campaign_id,
-                    "parent_slug": row_parent_slug,
-                    "company_name": company.company_name,
-                    "contact_name": primary_contact.full_name if primary_contact else "",
-                    "contact_title": primary_contact.title if primary_contact else "",
-                    "contact_email": primary_contact.email if primary_contact else "",
-                    "final_subject": final_subject,
-                    "final_body": final_body,
-                    "generation_status": "OK",
-                    "generation_warning": generation_warning,
-                    "error_code": "",
-                    "risk_flags": "; ".join(risk_flags),
-                    "status": "PENDING",
-                    "updated_at": utc_now_iso(),
-                    "idempotency_key": lead_row.idempotency_key,
-                    "sequence_steps": len(sequence.steps),
-                    "attack_angle": sequence.attack_angle,
-                }
-            )
-            record_id = store.insert_campaign_company_result(
-                result,
-                extra_payload={
-                    "raw_row": lead_row.raw_row,
-                    "idempotency_key": lead_row.idempotency_key,
-                    "source_sheet_id": lead_row.sheet_id,
-                    "source_tab_name": lead_row.tab_name,
-                    "source_row_index": lead_row.row_index,
-                    "source_modified_time": lead_row.modified_time,
-                    "generation_status": "OK",
-                    "generation_warning": generation_warning,
-                    "error_code": "",
-                },
-            )
-            store.complete_drive_row_ingestion(
-                idempotency_key=lead_row.idempotency_key,
-                record_id=record_id,
-                status="COMPLETED",
-            )
-            export_rows.append(export_row)
-            drive_export_items.append(
-                {
-                    "idempotency_key": lead_row.idempotency_key,
-                    "parent_slug": row_parent_slug,
-                    "company_name": company.company_name,
-                    "contact_name": primary_contact.full_name if primary_contact else "",
-                    "generation_status": "OK",
-                    "sequence_result": sequence,
-                }
-            )
-            rows_generated_ok += 1
-            processed_companies += 1
-        except Exception as exc:
-            rows_failed += 1
-            warnings_total += 1
-            error_row = _error_row(
-                campaign_id=campaign_id,
-                parent_slug=row_parent_slug,
-                raw_row=lead_row.raw_row,
-                error_code="DRIVE_ROW_PROCESSING_FAILED",
-                warning_message=str(exc),
-                output_schema=output_schema,
-            )
-            error_row["idempotency_key"] = lead_row.idempotency_key
-            export_rows.append(error_row)
-            store.complete_drive_row_ingestion(
-                idempotency_key=lead_row.idempotency_key,
-                record_id=None,
-                status="FAILED",
-                error_message=str(exc)[:500],
-            )
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_process_drive_row, row) for row in lead_rows]
+        for f in as_completed(futures):
+            f.result()  # re-raise any unhandled exceptions from worker
 
     export_result = export_sequence_to_drive(
         workspace_folder_id,
