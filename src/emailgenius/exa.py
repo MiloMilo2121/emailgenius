@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from datetime import date, timedelta
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -135,7 +134,7 @@ class ExaClient:
         parsed_entities = entities if isinstance(entities, list) else []
         return {
             "query": query,
-            "results": [asdict(item) for item in parsed_results],
+            "results": [item.model_dump() for item in parsed_results],
             "entities": parsed_entities,
         }
 

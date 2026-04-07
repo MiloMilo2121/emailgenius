@@ -329,6 +329,8 @@ class CampaignAgentEngine:
                 call = getattr(self._llm, "_call_chat_json_targets", None)
                 if call:
                     call = lambda **k: getattr(self._llm, "_call_chat_json_targets")(targets=self._llm._research_targets, **k)
+            if not callable(call):
+                call = getattr(self._llm, "_call_chat_json", None)
         else:
             call = getattr(self._llm, "_call_chat_json", None)
 

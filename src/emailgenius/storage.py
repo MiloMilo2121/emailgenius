@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,17 @@ from psycopg_pool import AsyncConnectionPool, ConnectionPool
 from .profiles import parent_profile_from_dict, parent_profile_to_dict
 from .types import CampaignCompanyResult, CampaignSummary, ParentProfile
 from .utils import utc_now_iso
+
+
+def _to_payload(value: Any) -> Any:
+    if value is None:
+        return None
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump()
+    if is_dataclass(value):
+        return asdict(value)
+    return value
 
 
 class PostgresStore:
@@ -390,7 +401,7 @@ class PostgresStore:
                 )
 
     def finalize_campaign(self, campaign_id: str, summary: CampaignSummary) -> None:
-        summary_json = json.dumps(asdict(summary), ensure_ascii=False)
+        summary_json = json.dumps(_to_payload(summary), ensure_ascii=False)
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -410,18 +421,15 @@ class PostgresStore:
     ) -> str:
         record_id = str(uuid.uuid4())
         payload_dict = {
-            "company": asdict(result.company),
-            "contact": asdict(result.contact) if result.contact else None,
-            "dossier": {
-                **asdict(result.dossier),
-                "news_items": [asdict(item) for item in result.dossier.news_items],
-            },
-            "variants": [asdict(item) for item in result.variants],
+            "company": _to_payload(result.company),
+            "contact": _to_payload(result.contact) if result.contact else None,
+            "dossier": _to_payload(result.dossier),
+            "variants": [_to_payload(item) for item in result.variants],
             "recommended_variant": result.recommended_variant,
-            "sequence_result": asdict(result.sequence_result) if result.sequence_result else None,
-            "research_dossier": asdict(result.research_dossier) if result.research_dossier else None,
-            "instantly_draft": asdict(result.instantly_draft) if result.instantly_draft else None,
-            "approval": asdict(result.approval),
+            "sequence_result": _to_payload(result.sequence_result) if result.sequence_result else None,
+            "research_dossier": _to_payload(result.research_dossier) if result.research_dossier else None,
+            "instantly_draft": _to_payload(result.instantly_draft) if result.instantly_draft else None,
+            "approval": _to_payload(result.approval),
             "risk_flags": result.risk_flags,
             "created_at": utc_now_iso(),
         }
@@ -1100,7 +1108,7 @@ class AsyncPostgresStore:
         return campaign_id
 
     async def finalize_campaign(self, campaign_id: str, summary: CampaignSummary) -> None:
-        summary_json = json.dumps(asdict(summary), ensure_ascii=False)
+        summary_json = json.dumps(_to_payload(summary), ensure_ascii=False)
         async with self.pool.connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
@@ -1121,18 +1129,15 @@ class AsyncPostgresStore:
     ) -> str:
         record_id = str(uuid.uuid4())
         payload_dict = {
-            "company": asdict(result.company),
-            "contact": asdict(result.contact) if result.contact else None,
-            "dossier": {
-                **asdict(result.dossier),
-                "news_items": [asdict(item) for item in result.dossier.news_items],
-            },
-            "variants": [asdict(item) for item in result.variants],
+            "company": _to_payload(result.company),
+            "contact": _to_payload(result.contact) if result.contact else None,
+            "dossier": _to_payload(result.dossier),
+            "variants": [_to_payload(item) for item in result.variants],
             "recommended_variant": result.recommended_variant,
-            "sequence_result": asdict(result.sequence_result) if result.sequence_result else None,
-            "research_dossier": asdict(result.research_dossier) if result.research_dossier else None,
-            "instantly_draft": asdict(result.instantly_draft) if result.instantly_draft else None,
-            "approval": asdict(result.approval),
+            "sequence_result": _to_payload(result.sequence_result) if result.sequence_result else None,
+            "research_dossier": _to_payload(result.research_dossier) if result.research_dossier else None,
+            "instantly_draft": _to_payload(result.instantly_draft) if result.instantly_draft else None,
+            "approval": _to_payload(result.approval),
             "risk_flags": result.risk_flags,
             "created_at": utc_now_iso(),
         }

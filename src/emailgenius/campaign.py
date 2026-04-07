@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
+import threading
 from urllib.parse import urlparse
 
 from .agents import CampaignAgentEngine
@@ -449,7 +450,13 @@ def _run_campaign_drive_mode(
             companies_total=0,
             generated_total=0,
             warnings_total=0,
-            cost_eur=0.0,
+            rows_total=0,
+            rows_valid=0,
+            rows_skipped=0,
+            rows_generated_ok=0,
+            rows_failed=0,
+            estimated_cost_eur=0.0,
+            actual_cost_eur=0.0,
         ), Path(out_dir) / "campaign-empty.csv", []
 
     llm_items_planned = len({item.idempotency_key for item in lead_rows})
@@ -1024,8 +1031,6 @@ def _run_row_mode(
     workers = max(1, int(max_concurrency))
     total = len(valid_rows)
     done = 0
-    # Bug 12: Add concurrency limits / rate limiting semaphore
-    import threading
     llm_semaphore = threading.Semaphore(workers)
     
     def _worker_wrapper(**kwargs):
@@ -1104,6 +1109,8 @@ def _process_company_like_item(
     snippets: list[str] = []
     enrichment_flags: list[str] = []
     nebula_payload: dict[str, object] = {}
+    research_dossier = None
+    instantly_draft = None
 
     checkpointer_builder = getattr(store, "build_langgraph_checkpointer", None)
     checkpointer = checkpointer_builder() if callable(checkpointer_builder) else None
@@ -1130,17 +1137,7 @@ def _process_company_like_item(
             if research_dossier.recent_news:
                 news_text = " | ".join(f"{n.title}: {n.snippet}" for n in research_dossier.recent_news)
                 snippets.append("Recent News: " + news_text)
-            
-            # Helper to convert to enrichment dossier
-            dossier = EnrichmentDossier(
-                site_summary=research_dossier.company_summary,
-                news_items=research_dossier.recent_news,
-                linkedin_public_summary="",
-                pain_hypotheses=[research_dossier.pain_hypothesis] if research_dossier.pain_hypothesis else [],
-                opportunity_hypotheses=[research_dossier.personalization_angle] if research_dossier.personalization_angle else [],
-                evidence=research_dossier.key_facts,
-                sources=research_dossier.citations,
-            )
+            dossier = _research_dossier_to_enrichment_dossier(research_dossier)
         except RuntimeError as exc:
             message = str(exc)
             return _RowOutcome(
@@ -1167,6 +1164,7 @@ def _process_company_like_item(
     else:
         if not company.website:
             template_warning = "Website mancante: usato seed template senza personalizzazione web."
+            enrichment_flags.append("template_only_no_website")
             dossier = _minimal_dossier(company_name=company.company_name)
             nebula = run_nebula_enrichment_machine(
                 company=company,
@@ -1228,6 +1226,50 @@ def _process_company_like_item(
                     snippets.extend(rag_snippets)
 
             snippets = _dedupe_snippets(snippets, limit=14)
+
+    supports_agent_chat = callable(getattr(llm, "_call_chat_json", None)) or callable(
+        getattr(llm, "_call_chat_json_targets", None)
+    )
+    supports_legacy_variants = callable(getattr(llm, "generate_campaign_variants", None))
+    supports_instantly_draft = callable(getattr(llm, "generate_instantly_draft", None))
+
+    if (not supports_agent_chat) and (supports_legacy_variants or supports_instantly_draft):
+        return _process_company_like_item_legacy(
+            campaign_id=campaign_id,
+            parent_slug=parent_slug,
+            parent=parent,
+            company=company,
+            primary_contact=primary_contact,
+            dossier=dossier,
+            raw_row=raw_row,
+            llm=llm,
+            variant_mode=variant_mode,
+            llm_policy=llm_policy,
+            max_retries=max_retries,
+            backoff_base_seconds=backoff_base_seconds,
+            output_schema=output_schema,
+            used_llm=used_llm,
+            nebula_payload=nebula_payload,
+            enrichment_flags=enrichment_flags,
+            template_warning=template_warning,
+            enrichment_warning=enrichment_warning,
+            snippets=snippets,
+            research_dossier=research_dossier,
+            research_sources=research_sources,
+            row_index=row_index,
+        )
+
+    if research_dossier is not None and supports_instantly_draft:
+        try:
+            instantly_draft = llm.generate_instantly_draft(
+                parent=parent,
+                company=company,
+                contact=primary_contact,
+                research_dossier=research_dossier,
+                llm_policy=llm_policy,
+            )
+        except Exception:
+            instantly_draft = None
 
     try:
         sequence = engine.generate_sequence(
@@ -1292,34 +1334,32 @@ def _process_company_like_item(
         recommended_variant="",
         approval=ApprovalRecord(status="PENDING", updated_at=utc_now_iso()),
         sequence_result=sequence,
+        research_dossier=research_dossier,
+        instantly_draft=instantly_draft,
         risk_flags=risk_flags,
     )
 
     selected_step = next((item for item in sequence.steps if item.step_id.upper() == "E1"), None)
     final_subject = selected_step.subject if selected_step else ""
     final_body = selected_step.body if selected_step else ""
-    generation_warning = ""
+    warning_parts = [part for part in [template_warning, enrichment_warning] if part]
     if risk_flags:
-        generation_warning = "; ".join(risk_flags)[:240]
+        warning_parts.append("; ".join(risk_flags))
+    generation_warning = "; ".join(part for part in warning_parts if part)[:240]
 
-    export_row = dict(raw_row)
-    export_row.update({
-        "campaign_id": campaign_id,
-        "parent_slug": parent_slug,
-        "company_name": company.company_name,
-        "contact_name": primary_contact.full_name if primary_contact else "",
-        "contact_title": primary_contact.title if primary_contact else "",
-        "contact_email": primary_contact.email if primary_contact else "",
-        "final_subject": final_subject,
-        "final_body": final_body,
-        "generation_status": "OK",
-        "generation_warning": generation_warning,
-        "error_code": "",
-        "risk_flags": "; ".join(risk_flags),
-        "status": "PENDING",
-        "sequence_steps": len(sequence.steps),
-        "attack_angle": sequence.attack_angle,
-    })
+    export_row = _company_result_to_row(
+        result=result,
+        raw_row=raw_row,
+        selected_variant="A",
+        final_subject=final_subject,
+        final_body=final_body,
+        generation_status="OK",
+        generation_warning=generation_warning,
+        error_code="",
+        output_schema=output_schema,
+    )
+    export_row["sequence_steps"] = len(sequence.steps)
+    export_row["attack_angle"] = sequence.attack_angle
 
     extra_payload = {
         "final_subject": final_subject,
@@ -1330,7 +1370,12 @@ def _process_company_like_item(
         "used_llm": used_llm,
         "raw_row": raw_row,
         "nebula": nebula_payload,
+        "research_sources": list(research_sources),
     }
+    if research_dossier is not None:
+        extra_payload["research_dossier"] = research_dossier.model_dump()
+    if instantly_draft is not None:
+        extra_payload["instantly_draft"] = instantly_draft.model_dump()
 
     return _RowOutcome(
         row_index=row_index,
@@ -1339,6 +1384,199 @@ def _process_company_like_item(
         extra_payload=extra_payload,
         warning=bool(risk_flags),
         failed=False,
+        fatal_error=False,
+        error_message=None,
+    )
+
+
+def _process_company_like_item_legacy(
+    *,
+    campaign_id: str,
+    parent_slug: str,
+    parent,
+    company,
+    primary_contact,
+    dossier: EnrichmentDossier,
+    raw_row: dict[str, str],
+    llm: LLMGateway,
+    variant_mode: str,
+    llm_policy: str,
+    max_retries: int,
+    backoff_base_seconds: float,
+    output_schema: str,
+    used_llm: bool,
+    nebula_payload: dict[str, object],
+    enrichment_flags: list[str],
+    template_warning: str,
+    enrichment_warning: str,
+    snippets: list[str],
+    research_dossier,
+    research_sources: list[str],
+    row_index: int,
+) -> _RowOutcome:
+    requested_variants = ["A", "B"] if (variant_mode or "ab").lower() == "ab" else ["A", "B", "C"]
+    variants: list[DraftEmailVariant] = []
+    recommended_variant = requested_variants[0]
+    global_flags: list[str] = []
+
+    generate_variants = getattr(llm, "generate_campaign_variants", None)
+    if callable(generate_variants):
+        try:
+            variants, recommended_variant, global_flags = generate_variants(
+                parent=parent,
+                company=company,
+                contact=primary_contact,
+                dossier=dossier,
+                marketing_snippets=snippets,
+                variant_mode=variant_mode,
+                llm_policy=llm_policy,
+                max_retries=max_retries,
+                backoff_base_seconds=backoff_base_seconds,
+            )
+            used_llm = True
+        except Exception as exc:
+            message = str(exc)
+            if llm_policy == "strict":
+                return _RowOutcome(
+                    row_index=row_index,
+                    export_row={},
+                    result=None,
+                    extra_payload={"used_llm": used_llm, "nebula": nebula_payload},
+                    warning=True,
+                    failed=True,
+                    fatal_error=True,
+                    error_message=message,
+                )
+
+    if not variants:
+        for idx, name in enumerate(requested_variants):
+            suffix = ""
+            if idx == 1:
+                suffix = " - follow-up"
+            elif idx == 2:
+                suffix = " - ultimo tentativo"
+            variants.append(
+                DraftEmailVariant(
+                    variant=name,
+                    subject=format_email_subject(_template_only_subject(company=company, contact=primary_contact) + suffix),
+                    body=format_email_body(render_seed_template(parent, company, primary_contact)),
+                    cta=parent.cta_policy,
+                    risk_flags=[],
+                    confidence=0.0,
+                )
+            )
+        recommended_variant = requested_variants[0]
+
+    instantly_draft = None
+    generate_instantly = getattr(llm, "generate_instantly_draft", None)
+    if research_dossier is not None and callable(generate_instantly):
+        try:
+            instantly_draft = generate_instantly(
+                parent=parent,
+                company=company,
+                contact=primary_contact,
+                research_dossier=research_dossier,
+                llm_policy=llm_policy,
+            )
+        except Exception:
+            instantly_draft = None
+
+    by_name = _variants_by_name(variants)
+    recommended = str(recommended_variant or requested_variants[0]).upper()
+    if recommended not in by_name:
+        recommended = next(iter(by_name.keys()), requested_variants[0])
+
+    passing = [
+        name
+        for name in ["A", "B", "C"]
+        if name in by_name and "failed_copy_guard" not in list(by_name[name].get("risk_flags") or [])
+    ]
+    failed = [name for name in ["A", "B", "C"] if name in by_name and name not in passing]
+
+    selected_variant = recommended
+    if passing and selected_variant not in passing:
+        selected_variant = passing[0]
+    if selected_variant not in by_name:
+        selected_variant = next(iter(by_name.keys()), requested_variants[0])
+
+    selected_payload = by_name.get(selected_variant, {})
+    final_subject = str(selected_payload.get("subject") or _template_only_subject(company=company, contact=primary_contact))
+    final_body = str(selected_payload.get("body") or render_seed_template(parent, company, primary_contact))
+
+    generation_status = "OK" if passing else ("FAILED_COPY_GUARD" if by_name else "ERROR")
+    error_code = "" if generation_status == "OK" else ("FAILED_COPY_GUARD" if by_name else "FAILED_LLM_RETRY_EXHAUSTED")
+
+    warning_parts: list[str] = []
+    for part in [template_warning, enrichment_warning]:
+        value = str(part or "").strip()
+        if value:
+            warning_parts.append(value)
+    if passing and failed:
+        warning_parts.append(f"Copy guard fallito per varianti: {', '.join(failed)}")
+    elif not passing and failed:
+        warning_parts.append(f"Tutte le varianti hanno fallito il copy guard: {', '.join(failed)}")
+    generation_warning = "; ".join(warning_parts)[:240]
+
+    risk_flags = set(str(item) for item in global_flags if str(item))
+    risk_flags.update(enrichment_flags)
+    for item in list(selected_payload.get("risk_flags") or []):
+        text = str(item).strip()
+        if text:
+            risk_flags.add(text)
+    if passing:
+        risk_flags.discard("failed_copy_guard")
+
+    result = CampaignCompanyResult(
+        campaign_id=campaign_id,
+        parent_slug=parent_slug,
+        company=company,
+        contact=primary_contact,
+        dossier=dossier,
+        variants=variants,
+        recommended_variant=recommended,
+        approval=ApprovalRecord(status="PENDING", updated_at=utc_now_iso()),
+        sequence_result=None,
+        research_dossier=research_dossier,
+        instantly_draft=instantly_draft,
+        risk_flags=sorted(risk_flags),
+    )
+    export_row = _company_result_to_row(
+        result=result,
+        raw_row=raw_row,
+        selected_variant=selected_variant,
+        final_subject=final_subject,
+        final_body=final_body,
+        generation_status=generation_status,
+        generation_warning=generation_warning,
+        error_code=error_code,
+        output_schema=output_schema,
+    )
+
+    extra_payload = {
+        "final_subject": final_subject,
+        "final_body": final_body,
+        "generation_status": generation_status,
+        "generation_warning": generation_warning,
+        "error_code": error_code,
+        "used_llm": used_llm,
+        "raw_row": raw_row,
+        "nebula": nebula_payload,
+        "selected_variant": selected_variant,
+        "recommended_variant": recommended,
+        "research_sources": list(research_sources),
+    }
+    if research_dossier is not None:
+        extra_payload["research_dossier"] = research_dossier.model_dump()
+    if instantly_draft is not None:
+        extra_payload["instantly_draft"] = instantly_draft.model_dump()
+
+    return _RowOutcome(
+        row_index=row_index,
+        export_row=export_row,
+        result=result,
+        extra_payload=extra_payload,
+        warning=bool(generation_warning or risk_flags),
+        failed=(generation_status != "OK"),
         fatal_error=False,
         error_message=None,
     )
@@ -1758,5 +1996,5 @@ def _company_result_to_row(
 def _variants_by_name(variants: list[DraftEmailVariant]) -> dict[str, dict[str, object]]:
     out: dict[str, dict[str, object]] = {}
     for variant in variants:
-        out[variant.variant.upper()] = asdict(variant)
+        out[variant.variant.upper()] = variant.model_dump()
     return out

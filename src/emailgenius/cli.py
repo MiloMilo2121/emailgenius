@@ -5,7 +5,6 @@ import asyncio
 import csv
 import json
 import time
-from dataclasses import asdict
 from pathlib import Path
 
 from .config import AppConfig
@@ -251,9 +250,18 @@ def _store(config: AppConfig):
 
 def _llm(config: AppConfig):
     from .llm import LLMGateway
-    if not config.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY non configurato")
-    return LLMGateway(config.openai_api_key)
+    return LLMGateway(
+        api_key=config.openai_api_key,
+        api_base_url=config.openai_base_url,
+        chat_model=config.openai_chat_model,
+        embedding_model=config.openai_embedding_model,
+        fallback_api_key=config.openai_fallback_api_key,
+        fallback_api_base_url=config.openai_fallback_base_url,
+        fallback_chat_model=config.openai_fallback_chat_model,
+        research_model=config.research_model,
+        writer_model=config.writer_model,
+        writer_fallback_model=config.writer_fallback_model,
+    )
 def _run_workspace_sync_once(*, config, store, llm, slug, workspace_folder_id, out_dir, gsheets_auth, headless, llm_policy) -> int:
     from .campaign import run_campaign
     run_campaign(
@@ -497,7 +505,7 @@ def main() -> int:
                     workspace_folder_id=args.workspace_folder_id,
                     research_sources=args.research_sources,
                 )
-                print(json.dumps(asdict(summary), ensure_ascii=False, indent=2))
+                print(json.dumps(summary.model_dump(), ensure_ascii=False, indent=2))
                 print(f"Exported to {path}")
             except Exception as e:
                 print(f"Campaign failed: {e}")

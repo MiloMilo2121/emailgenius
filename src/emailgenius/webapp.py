@@ -15,12 +15,13 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from psycopg_pool import AsyncConnectionPool
 
 from .campaign import run_campaign
 from .config import AppConfig, app_home
 from .knowledge import ingest_knowledge_file
 from .llm import LLMGateway, render_instantly_body_template
-from .storage import PostgresStore
+from .storage import AsyncPostgresStore, PostgresStore
 from .types import ParentProfile
 from .utils import slugify
 
@@ -230,18 +231,24 @@ def create_app(
         llm = _get_llm(request)
         uploads_dir = app_home() / "web-uploads" / slug / "knowledge"
         uploads_dir.mkdir(parents=True, exist_ok=True)
-        for upload in files:
-            suffix = Path(upload.filename or "knowledge.txt").suffix or ".txt"
-            local_path = uploads_dir / f"{uuid.uuid4().hex}{suffix}"
-            with local_path.open("wb") as handle:
-                shutil.copyfileobj(upload.file, handle)
-            ingest_knowledge_file(
-                store=store,
-                llm=llm,
-                parent_slug=slug,
-                file_path=str(local_path),
-                kind=kind,
-            )
+        pool = AsyncConnectionPool(conninfo=request.app.state.config.database_url, open=False)
+        await pool.open(wait=True)
+        try:
+            async_store = AsyncPostgresStore(pool)
+            for upload in files:
+                suffix = Path(upload.filename or "knowledge.txt").suffix or ".txt"
+                local_path = uploads_dir / f"{uuid.uuid4().hex}{suffix}"
+                with local_path.open("wb") as handle:
+                    shutil.copyfileobj(upload.file, handle)
+                await ingest_knowledge_file(
+                    store=async_store,
+                    llm=llm,
+                    parent_slug=slug,
+                    file_path=str(local_path),
+                    kind=kind,
+                )
+        finally:
+            await pool.close()
         return RedirectResponse(url=f"/parents/{slug}?message=Knowledge+indicizzata", status_code=303)
 
     @app.post("/campaigns/local", response_model=None)

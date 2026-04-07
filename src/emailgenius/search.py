@@ -158,7 +158,7 @@ def search_news_web(query: str, *, max_results: int = 8, timeout_s: int = DEFAUL
     except Exception:
         logger.warning("Tavily failed, falling back to DDG for news search...", exc_info=False)
         try:
-            hits = _map_ddg_hits(list(DDGS(timeout=timeout_s).news(query, max_results=max_results)), max_results=max_results)
+            hits = _map_ddg_hits(list(DDGS().news(query, max_results=max_results)), max_results=max_results)
         except Exception as exc:
             if _DDGRatelimit and isinstance(exc, _DDGRatelimit):
                 logger.warning("DDG rate limit hit for query: %s", query)
@@ -185,7 +185,7 @@ def search_web(query: str, *, max_results: int = 8, timeout_s: int = DEFAULT_TIM
     except Exception:
         logger.warning("Tavily failed, falling back to DDG for web search...", exc_info=False)
         try:
-            return _map_ddg_hits(list(DDGS(timeout=timeout_s).text(query, max_results=max_results)), max_results=max_results)
+            return _map_ddg_hits(list(DDGS().text(query, max_results=max_results)), max_results=max_results)
         except Exception as exc:
             if _DDGRatelimit and isinstance(exc, _DDGRatelimit):
                 logger.warning("DDG rate limit hit for query: %s", query)

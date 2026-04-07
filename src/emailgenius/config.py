@@ -28,12 +28,12 @@ class AppConfig:
     database_url: str
     openai_api_key: str | None
     openai_base_url: str | None
-    tavily_api_key: str | None
-    remote_browser_ws_url: str | None
     openai_chat_model: str
     openai_embedding_model: str
     google_service_account_json: str | None
     retention_days: int
+    tavily_api_key: str | None = None
+    remote_browser_ws_url: str | None = None
     workspace_folder_id: str | None = None
     drive_poll_interval_seconds: int = 60
     io_mode: str = "local"
