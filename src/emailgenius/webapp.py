@@ -189,7 +189,11 @@ def create_app(
     app.state.store_factory = resolved_store_factory
     app.state.llm_factory = resolved_llm_factory
     app.state.templates = Jinja2Templates(directory=str(templates_dir))
-    app.state.jobs = _JobRegistry()
+    app.state.jobs = _JobRegistry(store_factory=resolved_store_factory)
+    try:
+        app.state.jobs.recover_orphans()
+    except Exception as exc:
+        _log.warning("app_jobs orphan recovery skipped: %s", exc)
 
     @app.get("/", response_class=HTMLResponse, response_model=None)
     def dashboard(request: Request) -> HTMLResponse:
@@ -444,6 +448,15 @@ def create_app(
         )
         return RedirectResponse(url=f"/jobs/{job.job_id}", status_code=303)
 
+    @app.post("/jobs/{job_id}/cancel", response_model=None)
+    def job_cancel(request: Request, job_id: str) -> Response:
+        registry: _JobRegistry = request.app.state.jobs
+        if not registry.request_cancel(job_id):
+            raise HTTPException(status_code=404, detail="Job not found")
+        if "application/json" in (request.headers.get("accept") or ""):
+            return JSONResponse({"job_id": job_id, "cancel_requested": True})
+        return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
+
     @app.get("/jobs/{job_id}", response_model=None)
     def job_detail(request: Request, job_id: str) -> Response:
         job = request.app.state.jobs.get(job_id)
@@ -536,15 +549,57 @@ class AppJob:
     campaign_id: str | None = None
     export_path: str | None = None
     retry_count: int = 0
+    cancel_requested: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
 class _JobRegistry:
-    def __init__(self) -> None:
+    """Job registry with optional write-through persistence to Postgres.
+
+    When a store_factory is supplied and the bound store implements
+    create_app_job/update_app_job/list_recent_app_jobs, every state
+    change is mirrored to the database so jobs survive process
+    restarts. Each job also has an in-memory threading.Event that
+    callers can poll to honor cooperative cancellation requests.
+    """
+
+    def __init__(
+        self,
+        *,
+        store_factory: Callable[[], object] | None = None,
+    ) -> None:
         self._jobs: dict[str, AppJob] = {}
+        self._cancels: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
+        self._store_factory = store_factory
+
+    def _store(self) -> object | None:
+        if self._store_factory is None:
+            return None
+        try:
+            return self._store_factory()
+        except Exception:
+            return None
+
+    def _store_call(self, method: str, *args: object, **kwargs: object) -> object | None:
+        store = self._store()
+        if store is None:
+            return None
+        fn = getattr(store, method, None)
+        if not callable(fn):
+            return None
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # persistence is best-effort
+            _log.warning("app_jobs.%s failed: %s", method, exc)
+            return None
+
+    def recover_orphans(self) -> None:
+        """Mark RUNNING/QUEUED jobs as FAILED at boot. Their owning
+        thread is gone with the previous process."""
+        self._store_call("fail_orphaned_app_jobs")
 
     def create(self, *, label: str, kind: str, parent_slug: str, payload_json: dict[str, object]) -> AppJob:
         now = _utc_now_iso()
@@ -560,6 +615,15 @@ class _JobRegistry:
         )
         with self._lock:
             self._jobs[job.job_id] = job
+            self._cancels[job.job_id] = threading.Event()
+        self._store_call(
+            "create_app_job",
+            job_id=job.job_id,
+            label=label,
+            kind=kind,
+            parent_slug=parent_slug,
+            payload_json=payload_json,
+        )
         return job
 
     def mark_running(self, job_id: str) -> None:
@@ -578,6 +642,26 @@ class _JobRegistry:
     def mark_failed(self, job_id: str, *, error: str) -> None:
         self._patch(job_id, status="FAILED", error=error, error_message=error)
 
+    def request_cancel(self, job_id: str) -> bool:
+        with self._lock:
+            event = self._cancels.get(job_id)
+            job = self._jobs.get(job_id)
+            if job is None or event is None:
+                return False
+            job.cancel_requested = True
+            job.updated_at = _utc_now_iso()
+        event.set()
+        self._store_call("update_app_job", job_id, cancel_requested=True)
+        return True
+
+    def cancel_event(self, job_id: str) -> threading.Event | None:
+        with self._lock:
+            return self._cancels.get(job_id)
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        event = self.cancel_event(job_id)
+        return bool(event and event.is_set())
+
     def get(self, job_id: str) -> AppJob | None:
         with self._lock:
             return self._jobs.get(job_id)
@@ -590,10 +674,19 @@ class _JobRegistry:
 
     def _patch(self, job_id: str, **changes: object) -> None:
         with self._lock:
-            job = self._jobs[job_id]
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
             for key, value in changes.items():
                 setattr(job, key, value)
             job.updated_at = _utc_now_iso()
+        # Map internal field names to DB columns (drop fields that don't exist in the table).
+        db_changes: dict[str, object] = {}
+        for key, value in changes.items():
+            if key in {"status", "message", "error", "campaign_id", "export_path", "cancel_requested"}:
+                db_changes[key] = value
+        if db_changes:
+            self._store_call("update_app_job", job_id, **db_changes)
 
 
 JobRegistry = _JobRegistry
@@ -632,12 +725,20 @@ def _launch_background_job(
 
     t = threading.Thread(target=runner, name=f"emailgenius-job-{job_id}", daemon=True)
     t.start()
-    
+
     def _watchdog() -> None:
         t.join(timeout=MAX_JOB_SECONDS)
         if t.is_alive():
+            # Cooperative cancel: signal the worker so any code that
+            # checks registry.is_cancel_requested can exit cleanly. The
+            # thread is a daemon so it won't block process shutdown if
+            # it doesn't honor the signal.
+            try:
+                registry.request_cancel(job_id)
+            except Exception:
+                pass
             registry.mark_failed(job_id, error=f"Job timeout dopo {MAX_JOB_SECONDS}s")
-            
+
     threading.Thread(target=_watchdog, daemon=True).start()
 
 

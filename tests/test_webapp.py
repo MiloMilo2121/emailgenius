@@ -256,6 +256,95 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(response.text, "report ok")
 
 
+class JobRegistryTests(unittest.TestCase):
+    def test_cancel_sets_event_and_flag(self) -> None:
+        from emailgenius.webapp import _JobRegistry
+
+        registry = _JobRegistry(store_factory=None)
+        job = registry.create(label="t", kind="x", parent_slug="azienda-a", payload_json={})
+        self.assertFalse(registry.is_cancel_requested(job.job_id))
+        self.assertTrue(registry.request_cancel(job.job_id))
+        self.assertTrue(registry.is_cancel_requested(job.job_id))
+        ev = registry.cancel_event(job.job_id)
+        self.assertIsNotNone(ev)
+        self.assertTrue(ev.is_set())  # type: ignore[union-attr]
+        self.assertTrue(registry.get(job.job_id).cancel_requested)  # type: ignore[union-attr]
+
+    def test_cancel_unknown_job_returns_false(self) -> None:
+        from emailgenius.webapp import _JobRegistry
+
+        registry = _JobRegistry()
+        self.assertFalse(registry.request_cancel("nope"))
+
+    def test_persistence_failures_do_not_break_registry(self) -> None:
+        from emailgenius.webapp import _JobRegistry
+
+        class _BadStore:
+            def create_app_job(self, **kwargs):
+                raise RuntimeError("db down")
+
+            def update_app_job(self, *args, **kwargs):
+                raise RuntimeError("db down")
+
+            def fail_orphaned_app_jobs(self):
+                raise RuntimeError("db down")
+
+        registry = _JobRegistry(store_factory=lambda: _BadStore())
+        registry.recover_orphans()  # should not raise
+        job = registry.create(label="t", kind="x", parent_slug="", payload_json={})
+        registry.mark_running(job.job_id)
+        registry.mark_completed(job.job_id, message="ok", campaign_id=None, export_path=None)
+        self.assertEqual(registry.get(job.job_id).status, "COMPLETED")  # type: ignore[union-attr]
+
+
+class CancelEndpointTests(unittest.TestCase):
+    def test_cancel_endpoint_returns_404_for_unknown_job(self) -> None:
+        store = _FakeStore()
+        cfg = AppConfig(
+            database_url="postgresql://local",
+            openai_api_key=None,
+            openai_base_url=None,
+            openai_chat_model="gpt-5",
+            openai_embedding_model="text-embedding-3-small",
+            google_service_account_json=None,
+            retention_days=90,
+        )
+        app = create_app(
+            config=cfg,
+            store_factory=lambda: store,
+            llm_factory=lambda: _FakeLLM(),  # type: ignore[return-value]
+        )
+        client = TestClient(app)
+        response = client.post("/jobs/missing/cancel", headers={"content-length": "0"})
+        self.assertEqual(response.status_code, 404)
+
+    def test_cancel_endpoint_marks_job(self) -> None:
+        store = _FakeStore()
+        cfg = AppConfig(
+            database_url="postgresql://local",
+            openai_api_key=None,
+            openai_base_url=None,
+            openai_chat_model="gpt-5",
+            openai_embedding_model="text-embedding-3-small",
+            google_service_account_json=None,
+            retention_days=90,
+        )
+        app = create_app(
+            config=cfg,
+            store_factory=lambda: store,
+            llm_factory=lambda: _FakeLLM(),  # type: ignore[return-value]
+        )
+        client = TestClient(app)
+        registry = app.state.jobs
+        job = registry.create(label="t", kind="x", parent_slug="", payload_json={})
+        response = client.post(
+            f"/jobs/{job.job_id}/cancel",
+            headers={"content-length": "0", "accept": "application/json"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(registry.is_cancel_requested(job.job_id))
+
+
 class SecurityMiddlewareTests(unittest.TestCase):
     def _app(
         self,

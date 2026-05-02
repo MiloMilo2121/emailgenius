@@ -169,6 +169,27 @@ class PostgresStore:
             CREATE INDEX IF NOT EXISTS idx_drive_row_ingestions_status
             ON drive_row_ingestions(status, updated_at DESC)
             """,
+            """
+            CREATE TABLE IF NOT EXISTS app_jobs (
+                job_id TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                parent_slug TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                message TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                campaign_id TEXT,
+                export_path TEXT,
+                cancel_requested BOOLEAN NOT NULL DEFAULT FALSE
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_app_jobs_status_started
+            ON app_jobs(status, started_at DESC)
+            """,
         ]
         try:
             with self._connect() as conn:
@@ -692,6 +713,108 @@ class PostgresStore:
                     """,
                     (status, record_id, error_message, idempotency_key),
                 )
+
+    def create_app_job(
+        self,
+        *,
+        job_id: str,
+        label: str,
+        kind: str,
+        parent_slug: str,
+        payload_json: dict[str, object],
+    ) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO app_jobs(job_id, label, kind, parent_slug, status, payload_json)
+                    VALUES (%s, %s, %s, %s, 'QUEUED', %s::jsonb)
+                    ON CONFLICT (job_id) DO NOTHING
+                    """,
+                    (
+                        job_id,
+                        label,
+                        kind,
+                        parent_slug or "",
+                        json.dumps(payload_json or {}, ensure_ascii=False),
+                    ),
+                )
+
+    def update_app_job(
+        self,
+        job_id: str,
+        *,
+        status: str | None = None,
+        message: str | None = None,
+        error: str | None = None,
+        campaign_id: str | None = None,
+        export_path: str | None = None,
+        cancel_requested: bool | None = None,
+    ) -> None:
+        sets: list[str] = []
+        params: list[object] = []
+        if status is not None:
+            sets.append("status=%s")
+            params.append(status)
+        if message is not None:
+            sets.append("message=%s")
+            params.append(message)
+        if error is not None:
+            sets.append("error=%s")
+            params.append(error)
+        if campaign_id is not None:
+            sets.append("campaign_id=%s")
+            params.append(campaign_id)
+        if export_path is not None:
+            sets.append("export_path=%s")
+            params.append(export_path)
+        if cancel_requested is not None:
+            sets.append("cancel_requested=%s")
+            params.append(cancel_requested)
+        if not sets:
+            return
+        sets.append("updated_at=NOW()")
+        params.append(job_id)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE app_jobs SET {', '.join(sets)} WHERE job_id=%s",
+                    tuple(params),
+                )
+
+    def get_app_job(self, job_id: str) -> dict[str, object] | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM app_jobs WHERE job_id=%s", (job_id,))
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def list_recent_app_jobs(self, *, limit: int = 10) -> list[dict[str, object]]:
+        capped = max(1, min(int(limit), 200))
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM app_jobs ORDER BY started_at DESC LIMIT %s",
+                    (capped,),
+                )
+                rows = cur.fetchall() or []
+        return [dict(r) for r in rows]
+
+    def fail_orphaned_app_jobs(self) -> int:
+        """Mark RUNNING/QUEUED jobs as FAILED on boot. The owning thread
+        died with the previous process; the row is now orphaned."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE app_jobs
+                    SET status='FAILED',
+                        error='Process restarted while job was running',
+                        updated_at=NOW()
+                    WHERE status IN ('RUNNING', 'QUEUED')
+                    """
+                )
+                return cur.rowcount
 
     def build_langgraph_checkpointer(self) -> Any | None:
         # Process-wide singleton: a fresh PostgresSaver opens a new
