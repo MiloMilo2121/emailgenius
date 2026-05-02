@@ -211,5 +211,61 @@ compliance_notes: [pubblico]
         self.assertIsInstance(rows[0], DriveLeadRow)
 
 
+class ExecuteWithBackoffTests(unittest.TestCase):
+    def test_fatal_status_is_not_retried(self) -> None:
+        from emailgenius.gdrive import _execute_with_backoff
+
+        for fatal in (400, 401, 403, 404):
+            with self.subTest(status=fatal):
+                calls = {"n": 0}
+
+                class FakeErr(Exception):
+                    pass
+
+                def boom():
+                    calls["n"] += 1
+                    err = FakeErr(f"http {fatal}")
+                    err.status_code = fatal  # type: ignore[attr-defined]
+                    raise err
+
+                with self.assertRaises(FakeErr):
+                    _execute_with_backoff(boom, max_attempts=4)
+                self.assertEqual(calls["n"], 1, f"status {fatal} should not retry")
+
+    def test_retryable_status_is_retried_then_succeeds(self) -> None:
+        from emailgenius.gdrive import _execute_with_backoff
+
+        attempts = {"n": 0}
+
+        class FakeErr(Exception):
+            pass
+
+        def maybe():
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                err = FakeErr("503")
+                err.status_code = 503  # type: ignore[attr-defined]
+                raise err
+            return "ok"
+
+        with patch("emailgenius.gdrive.time.sleep"):
+            result = _execute_with_backoff(maybe, max_attempts=5)
+        self.assertEqual(result, "ok")
+        self.assertEqual(attempts["n"], 3)
+
+    def test_unknown_error_is_not_retried(self) -> None:
+        from emailgenius.gdrive import _execute_with_backoff
+
+        calls = {"n": 0}
+
+        def boom():
+            calls["n"] += 1
+            raise RuntimeError("no status, no retry")
+
+        with self.assertRaises(RuntimeError):
+            _execute_with_backoff(boom, max_attempts=5)
+        self.assertEqual(calls["n"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

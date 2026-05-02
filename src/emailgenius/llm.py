@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import random
 import re
 import threading
 import time
+
+_log = logging.getLogger("emailgenius.llm")
 from dataclasses import asdict
 from difflib import SequenceMatcher
 from typing import Any
@@ -297,6 +300,9 @@ class LLMGateway:
         self._chat_timeout_s = 90.0
         self._embedding_timeout_s = 45.0
         self._cost_budget: CostBudget | None = None
+        self._embed_fallback_lock = threading.Lock()
+        self._embed_fallback_count = 0
+        self._last_embed_fallback_error: str | None = None
         self._primary_client = self._build_client(api_key=api_key, base_url=api_base_url)
         self._research_targets: list[tuple[Any, str]] = []
         self._writer_targets: list[tuple[Any, str]] = []
@@ -379,6 +385,7 @@ class LLMGateway:
         if embed_model.lower() in {"", "hash", "local", "none", "disabled", "hash-local"}:
             return [_hash_embedding(text) for text in texts]
         if self._primary_client is None:
+            self._note_embed_fallback("no_primary_client", None)
             return [_hash_embedding(text) for text in texts]
 
         try:
@@ -388,8 +395,33 @@ class LLMGateway:
                 texts=texts,
             )
             return [item.embedding for item in response.data]
-        except Exception:
+        except Exception as exc:
+            # Hash fallback used to swallow this silently, leaving the RAG
+            # quality "broken in the dark" whenever the embedding API
+            # misbehaved. Log the cause and bump a counter so operators
+            # can spot it.
+            self._note_embed_fallback(_classify_exception(exc), exc)
             return [_hash_embedding(text) for text in texts]
+
+    def _note_embed_fallback(self, reason: str, exc: Exception | None) -> None:
+        with self._embed_fallback_lock:
+            self._embed_fallback_count += 1
+            self._last_embed_fallback_error = repr(exc) if exc else reason
+        _log.warning(
+            "embed_texts falling back to local hash (reason=%s, error=%r)",
+            reason,
+            exc,
+        )
+
+    @property
+    def embed_fallback_count(self) -> int:
+        with self._embed_fallback_lock:
+            return self._embed_fallback_count
+
+    @property
+    def last_embed_fallback_error(self) -> str | None:
+        with self._embed_fallback_lock:
+            return self._last_embed_fallback_error
 
     def generate_campaign_variants(
         self,

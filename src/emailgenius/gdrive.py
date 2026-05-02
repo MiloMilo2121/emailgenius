@@ -478,24 +478,42 @@ def export_sequence_to_drive(
     )
 
 
+_RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
+_FATAL_HTTP_STATUSES = frozenset({400, 401, 403, 404})
+
+
+def _http_status_of(exc: Exception) -> int:
+    """Best-effort status extraction across googleapiclient.HttpError,
+    gspread.APIError, and httplib2/requests-style errors."""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        resp = getattr(exc, "resp", None)
+        if resp is not None:
+            status = getattr(resp, "status", None) or getattr(resp, "status_code", None)
+    if status is None:
+        response = getattr(exc, "response", None)
+        if response is not None:
+            status = getattr(response, "status_code", None)
+    try:
+        return int(status or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _execute_with_backoff(callable_fn: Callable[[], Any], *, max_attempts: int = 5) -> Any:
     attempt = 0
     while True:
         try:
             return callable_fn()
         except Exception as exc:
-            retryable = False
-            if type(exc).__name__ == "HttpError":
-                status = int(getattr(exc, "status_code", 0) or getattr(getattr(exc, "resp", None), "status", 0) or 0)
-                retryable = status in {429, 500, 502, 503, 504}
-            elif type(exc).__name__ == "APIError":
-                # gspread APIError
-                try:
-                    status = exc.response.status_code
-                    retryable = status in {429, 500, 502, 503, 504}
-                except Exception:
-                    retryable = False
-
+            status = _http_status_of(exc)
+            # Auth/permission/not-found/bad-request: never retry. The
+            # original code retried these up to 5 times, masking
+            # mis-shared folders and expired credentials behind a long
+            # wait + opaque failure.
+            if status in _FATAL_HTTP_STATUSES:
+                raise
+            retryable = status in _RETRYABLE_HTTP_STATUSES
             if not retryable or attempt >= max_attempts - 1:
                 raise
             delay = min(8.0, (2 ** attempt) + random.random())

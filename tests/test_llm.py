@@ -274,6 +274,51 @@ class PromptSanitizerTests(unittest.TestCase):
         self.assertLessEqual(len(encoded), 64000)
 
 
+class EmbedFallbackTests(unittest.TestCase):
+    def test_no_primary_client_logs_and_counts_fallback(self) -> None:
+        llm = LLMGateway(
+            api_key=None,
+            chat_model="gpt-5",
+            embedding_model="text-embedding-3-small",
+        )
+        with self.assertLogs("emailgenius.llm", level="WARNING") as cap:
+            vectors = llm.embed_texts(["foo", "bar"])
+        self.assertEqual(len(vectors), 2)
+        self.assertEqual(llm.embed_fallback_count, 1)
+        self.assertIn("falling back to local hash", "\n".join(cap.output))
+
+    def test_api_error_logs_and_counts_fallback(self) -> None:
+        llm = LLMGateway(
+            api_key="x",
+            chat_model="gpt-5",
+            embedding_model="text-embedding-3-small",
+        )
+
+        class _BoomClient:
+            class embeddings:  # noqa: N801
+                @staticmethod
+                def create(**kwargs):
+                    raise RuntimeError("boom from provider")
+
+        llm._primary_client = _BoomClient()  # type: ignore[attr-defined]
+        with self.assertLogs("emailgenius.llm", level="WARNING") as cap:
+            vectors = llm.embed_texts(["alpha"])
+        self.assertEqual(len(vectors), 1)
+        self.assertEqual(llm.embed_fallback_count, 1)
+        self.assertIn("boom from provider", llm.last_embed_fallback_error or "")
+        self.assertIn("falling back to local hash", "\n".join(cap.output))
+
+    def test_local_hash_model_does_not_count_as_fallback(self) -> None:
+        llm = LLMGateway(
+            api_key="x",
+            chat_model="gpt-5",
+            embedding_model="hash-local",
+        )
+        vectors = llm.embed_texts(["foo"])
+        self.assertEqual(len(vectors), 1)
+        self.assertEqual(llm.embed_fallback_count, 0)
+
+
 class ClassifyExceptionTests(unittest.TestCase):
     def test_openai_authentication_classifies_fatal(self) -> None:
         try:
