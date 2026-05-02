@@ -34,6 +34,46 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, value))
 
 
+_PROMPT_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?im)^\s*(system|assistant|user|developer)\s*:\s*"),
+    re.compile(r"(?i)ignore\s+(all\s+)?(previous|above|prior)\s+(instructions?|prompts?|messages?)"),
+    re.compile(r"(?i)disregard\s+(the\s+)?(above|prior|previous|system)"),
+    re.compile(r"<\|\s*im_(start|end)\s*\|>"),
+    re.compile(r"<\|\s*(system|user|assistant|endoftext)\s*\|>"),
+    re.compile(r"\[/?INST\]"),
+    re.compile(r"(?i)###\s*(system|instructions?)\s*###"),
+)
+
+_PROMPT_FIELD_MAX_LEN = 4000
+_PROMPT_TOTAL_MAX_LEN = 64000
+
+
+def _sanitize_for_prompt(value: Any, *, max_len: int = _PROMPT_FIELD_MAX_LEN) -> Any:
+    """Strip prompt-injection markers and clamp length on user/web-derived data
+    before serializing into an LLM prompt. Recurses into dicts/lists/tuples."""
+    if isinstance(value, str):
+        cleaned = value
+        for pat in _PROMPT_INJECTION_PATTERNS:
+            cleaned = pat.sub(" ", cleaned)
+        cleaned = cleaned.replace("```", "")
+        if len(cleaned) > max_len:
+            cleaned = cleaned[:max_len].rstrip() + "…"
+        return cleaned
+    if isinstance(value, dict):
+        return {k: _sanitize_for_prompt(v, max_len=max_len) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_for_prompt(item, max_len=max_len) for item in value]
+    return value
+
+
+def _safe_dump_payload(payload: Any) -> str:
+    """JSON-encode a sanitized payload with a hard cap on total length."""
+    encoded = json.dumps(_sanitize_for_prompt(payload), ensure_ascii=False)
+    if len(encoded) > _PROMPT_TOTAL_MAX_LEN:
+        encoded = encoded[:_PROMPT_TOTAL_MAX_LEN]
+    return encoded
+
+
 def format_email_subject(value: str) -> str:
     subject = (value or "").replace("\r", " ").replace("\n", " ").strip()
     subject = re.sub(r"\s+", " ", subject)
@@ -370,7 +410,7 @@ class LLMGateway:
             "Non inventare dettagli: usa solo dati presenti nel JSON (company/contact/dossier/snippets); se mancano, resta generico. "
             "Output SOLO JSON valido con chiavi: variants, recommended_variant, quality_notes."
         )
-        user_prompt = json.dumps(payload, ensure_ascii=False)
+        user_prompt = _safe_dump_payload(payload)
 
         attempt = 0
         while attempt <= max_retries:
@@ -637,7 +677,7 @@ class LLMGateway:
             parsed = self._call_chat_json_targets(
                 targets=self._research_targets,
                 system_prompt=system_prompt,
-                user_prompt=json.dumps(payload, ensure_ascii=False),
+                user_prompt=_safe_dump_payload(payload),
             )
             return _research_dossier_from_payload(parsed, company=company, research_bundle=research_bundle)
         except Exception as exc:
@@ -718,7 +758,7 @@ class LLMGateway:
             parsed = self._call_chat_json_targets(
                 targets=self._writer_targets,
                 system_prompt=system_prompt,
-                user_prompt=json.dumps(payload, ensure_ascii=False),
+                user_prompt=_safe_dump_payload(payload),
             )
             return _instantly_draft_from_payload(
                 parsed,
@@ -774,7 +814,7 @@ class LLMGateway:
         try:
             parsed = self._call_chat_json(
                 system_prompt=system_prompt,
-                user_prompt=json.dumps(repair_prompt, ensure_ascii=False),
+                user_prompt=_safe_dump_payload(repair_prompt),
             )
         except Exception:
             return None
@@ -1372,7 +1412,55 @@ def _normalize_similarity_text(value: str) -> str:
     return compact
 
 
+def _openai_exception_classes() -> tuple[tuple[type, ...], tuple[type, ...]]:
+    """Return (fatal_types, transient_types) tuples from openai if available.
+
+    Cached implicitly per process via the module-level singletons populated
+    on first call. Falls back to empty tuples when openai is missing or
+    older than the typed-exception era.
+    """
+    fatal: list[type] = []
+    transient: list[type] = []
+    try:
+        import openai as _openai
+    except Exception:
+        return tuple(fatal), tuple(transient)
+
+    for name in ("AuthenticationError", "PermissionDeniedError", "NotFoundError", "BadRequestError"):
+        cls = getattr(_openai, name, None)
+        if isinstance(cls, type):
+            fatal.append(cls)
+    for name in ("RateLimitError", "APITimeoutError", "APIConnectionError", "InternalServerError"):
+        cls = getattr(_openai, name, None)
+        if isinstance(cls, type):
+            transient.append(cls)
+    return tuple(fatal), tuple(transient)
+
+
+_OPENAI_FATAL_TYPES, _OPENAI_TRANSIENT_TYPES = _openai_exception_classes()
+
+
 def _classify_exception(exc: Exception) -> str:
+    # 1) Exception type from the openai SDK (most precise).
+    if _OPENAI_FATAL_TYPES and isinstance(exc, _OPENAI_FATAL_TYPES):
+        return "fatal"
+    if _OPENAI_TRANSIENT_TYPES and isinstance(exc, _OPENAI_TRANSIENT_TYPES):
+        return "transient"
+
+    # 2) HTTP status when the exception carries one (httpx/requests-style).
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(exc, "http_status", None)
+    response = getattr(exc, "response", None)
+    if status is None and response is not None:
+        status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        if status in (400, 401, 403, 404):
+            return "fatal"
+        if status == 429 or 500 <= status < 600:
+            return "transient"
+
+    # 3) Substring fallback for opaque/legacy errors.
     message = str(exc).lower()
     fatal_tokens = (
         "api key",
