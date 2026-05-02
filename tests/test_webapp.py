@@ -256,5 +256,105 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(response.text, "report ok")
 
 
+class SecurityMiddlewareTests(unittest.TestCase):
+    def _app(
+        self,
+        *,
+        auth_token: str | None = None,
+        csrf_enabled: bool = False,
+        max_upload_bytes: int = 10 * 1024 * 1024,
+        env: str = "dev",
+    ):
+        store = _FakeStore()
+        cfg = AppConfig(
+            database_url="postgresql://local",
+            openai_api_key=None,
+            openai_base_url=None,
+            openai_chat_model="gpt-5",
+            openai_embedding_model="text-embedding-3-small",
+            google_service_account_json=None,
+            retention_days=90,
+            auth_token=auth_token,
+            csrf_enabled=csrf_enabled,
+            env=env,
+            max_upload_bytes=max_upload_bytes,
+        )
+        app = create_app(
+            config=cfg,
+            store_factory=lambda: store,
+            llm_factory=lambda: _FakeLLM(),  # type: ignore[return-value]
+        )
+        return TestClient(app), store
+
+    def test_prod_without_token_refuses_to_boot(self) -> None:
+        with self.assertRaises(RuntimeError):
+            self._app(env="prod", auth_token=None)
+
+    def test_get_does_not_require_auth_token(self) -> None:
+        client, _ = self._app(auth_token="secret-abc")
+        self.assertEqual(client.get("/").status_code, 200)
+
+    def test_post_without_token_returns_401(self) -> None:
+        client, _ = self._app(auth_token="secret-abc")
+        response = client.post(
+            "/parents/azienda-a/activate",
+            headers={"content-length": "0"},
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_post_with_valid_token_passes(self) -> None:
+        client, _ = self._app(auth_token="secret-abc")
+        response = client.post(
+            "/parents/azienda-a/activate",
+            headers={"X-Auth-Token": "secret-abc"},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+
+    def test_oversized_body_returns_413(self) -> None:
+        client, _ = self._app(max_upload_bytes=1024)
+        response = client.post(
+            "/parents/azienda-a/activate",
+            headers={"content-length": "2048"},
+        )
+        self.assertEqual(response.status_code, 413)
+
+    def test_post_without_content_length_returns_411(self) -> None:
+        # httpx always sets content-length; force absence by overriding.
+        client, _ = self._app()
+        # Build a raw request via the underlying httpx client manually.
+        # When we pass an empty content with explicit Transfer-Encoding,
+        # httpx omits Content-Length.
+        response = client.post(
+            "/parents/azienda-a/activate",
+            headers={"transfer-encoding": "chunked"},
+            content=b"",
+        )
+        self.assertEqual(response.status_code, 411)
+
+    def test_csrf_required_when_enabled(self) -> None:
+        client, _ = self._app(csrf_enabled=True)
+        # First GET to obtain the CSRF cookie.
+        client.get("/")
+        # POST without echoing the cookie value into X-CSRF-Token fails.
+        response = client.post(
+            "/parents/azienda-a/activate",
+            headers={"content-length": "0"},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_csrf_passes_when_header_matches_cookie(self) -> None:
+        client, _ = self._app(csrf_enabled=True)
+        client.get("/")
+        token = client.cookies.get("emailgenius_csrf")
+        self.assertTrue(token)
+        response = client.post(
+            "/parents/azienda-a/activate",
+            headers={"content-length": "0", "X-CSRF-Token": token or ""},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+
+
 if __name__ == "__main__":
     unittest.main()

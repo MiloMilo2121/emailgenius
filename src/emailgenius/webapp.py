@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import csv
+import hmac
 import io
+import logging
+import secrets
 import shutil
 import threading
 import traceback
@@ -16,6 +19,93 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from psycopg_pool import AsyncConnectionPool
+from starlette.middleware.base import BaseHTTPMiddleware
+
+_log = logging.getLogger("emailgenius.webapp")
+
+_SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_CSRF_COOKIE_NAME = "emailgenius_csrf"
+_CSRF_HEADER_NAME = "X-CSRF-Token"
+_AUTH_HEADER_NAME = "X-Auth-Token"
+
+
+class SecurityMiddleware(BaseHTTPMiddleware):
+    """Single chokepoint for content-length, auth and CSRF checks.
+
+    Enforced unconditionally:
+      - Content-Length presence and cap on requests with a body.
+
+    Enforced when configured:
+      - Bearer-style token auth on unsafe methods, when auth_token is set.
+      - Double-submit-cookie CSRF on unsafe methods, when csrf_enabled is on.
+        (Templates must include the cookie value in a hidden _csrf field
+        or X-CSRF-Token header. Browser cross-site requests cannot read
+        the cookie, so they cannot forge a matching token.)
+    """
+
+    def __init__(
+        self,
+        app,
+        *,
+        auth_token: str | None,
+        csrf_enabled: bool,
+        max_upload_bytes: int,
+    ) -> None:
+        super().__init__(app)
+        self._auth_token = auth_token
+        self._csrf_enabled = csrf_enabled
+        self._max_upload_bytes = max_upload_bytes
+
+    async def dispatch(self, request: Request, call_next):
+        # 1) Content-Length cap (always on).
+        cl_raw = request.headers.get("content-length")
+        if cl_raw is not None:
+            try:
+                cl = int(cl_raw)
+            except ValueError:
+                return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+            if cl > self._max_upload_bytes:
+                return JSONResponse(
+                    {"detail": f"Request body exceeds {self._max_upload_bytes} bytes"},
+                    status_code=413,
+                )
+        elif request.method not in _SAFE_HTTP_METHODS:
+            # POST/PUT/etc must declare Content-Length so the cap is enforceable.
+            return JSONResponse({"detail": "Length Required"}, status_code=411)
+
+        # 2) Auth token (only on unsafe methods, only if configured).
+        if self._auth_token and request.method not in _SAFE_HTTP_METHODS:
+            provided = request.headers.get(_AUTH_HEADER_NAME) or ""
+            if not hmac.compare_digest(provided, self._auth_token):
+                return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+
+        # 3) CSRF (only on unsafe methods, only if enabled).
+        # Header-only validation: parsing the form here would consume
+        # multipart bodies into memory before the upload cap kicks in,
+        # and would break FastAPI's Form(...) re-parse downstream.
+        # Templates that need to submit forms with CSRF on must inject
+        # the cookie value into the X-CSRF-Token request header (e.g.
+        # via a small inline script).
+        if self._csrf_enabled and request.method not in _SAFE_HTTP_METHODS:
+            cookie_token = request.cookies.get(_CSRF_COOKIE_NAME) or ""
+            header_token = request.headers.get(_CSRF_HEADER_NAME) or ""
+            if not cookie_token or not header_token or not hmac.compare_digest(cookie_token, header_token):
+                return JSONResponse({"detail": "CSRF token missing or invalid"}, status_code=403)
+
+        response = await call_next(request)
+
+        # 4) Issue a CSRF cookie on safe responses if missing, so the
+        # next form submission can echo it back.
+        if self._csrf_enabled and request.method in _SAFE_HTTP_METHODS:
+            if _CSRF_COOKIE_NAME not in request.cookies:
+                response.set_cookie(
+                    _CSRF_COOKIE_NAME,
+                    secrets.token_urlsafe(32),
+                    httponly=False,  # readable by templates that inject it into forms
+                    samesite="Lax",
+                    secure=False,
+                )
+        return response
 
 from .campaign import run_campaign
 from .config import AppConfig, app_home
@@ -55,7 +145,20 @@ def create_app(
     llm_factory: Callable[[], LLMGateway] | None = None,
 ) -> FastAPI:
     resolved_config = config or AppConfig.from_env()
-    
+
+    # Refuse to boot in production without an auth token configured. This
+    # prevents accidentally exposing the unauthenticated API to the public
+    # internet, where every POST triggers LLM spend and a DoS is trivial.
+    if resolved_config.env == "prod" and not resolved_config.auth_token:
+        raise RuntimeError(
+            "EMAILGENIUS_ENV=prod requires EMAILGENIUS_AUTH_TOKEN to be set"
+        )
+    if not resolved_config.auth_token:
+        _log.warning(
+            "EMAILGENIUS_AUTH_TOKEN is not set; webapp accepts unauthenticated POSTs. "
+            "Set the variable in any deployment exposed beyond localhost."
+        )
+
     if store_factory:
         resolved_store_factory = store_factory
     else:
@@ -74,6 +177,12 @@ def create_app(
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     app = FastAPI(title="EmailGenius App")
+    app.add_middleware(
+        SecurityMiddleware,
+        auth_token=resolved_config.auth_token,
+        csrf_enabled=resolved_config.csrf_enabled,
+        max_upload_bytes=resolved_config.max_upload_bytes,
+    )
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
     app.mount("/reports", StaticFiles(directory=reports_dir), name="reports")
     app.state.config = resolved_config

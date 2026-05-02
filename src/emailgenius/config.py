@@ -44,6 +44,10 @@ class AppConfig:
     research_model: str = "deepseek/deepseek-chat-v3.1"
     writer_model: str = "anthropic/claude-3.5-haiku"
     writer_fallback_model: str | None = None
+    auth_token: str | None = None
+    csrf_enabled: bool = False
+    env: str = "dev"
+    max_upload_bytes: int = 10 * 1024 * 1024
 
 
     @classmethod
@@ -97,7 +101,21 @@ class AppConfig:
             writer_model=os.getenv("EMAILGENIUS_WRITER_MODEL", "anthropic/claude-3.5-haiku").strip()
             or "anthropic/claude-3.5-haiku",
             writer_fallback_model=_env_or_none("EMAILGENIUS_WRITER_FALLBACK_MODEL"),
+            auth_token=_env_or_none("EMAILGENIUS_AUTH_TOKEN"),
+            csrf_enabled=(os.getenv("EMAILGENIUS_CSRF_ENABLED") or "").strip().lower() in {"1", "true", "yes"},
+            env=(os.getenv("EMAILGENIUS_ENV") or "dev").strip().lower() or "dev",
+            max_upload_bytes=_parse_upload_cap(os.getenv("EMAILGENIUS_MAX_UPLOAD_BYTES")),
         )
+
+
+def _parse_upload_cap(raw: str | None) -> int:
+    if not raw or not raw.strip():
+        return 10 * 1024 * 1024
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return 10 * 1024 * 1024
+    return max(1024, value)
 
 
 def app_home() -> Path:
