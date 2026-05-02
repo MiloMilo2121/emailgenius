@@ -3,13 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 import re
+import threading
 import time
 from dataclasses import asdict
 from difflib import SequenceMatcher
 from typing import Any
-
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .guardrails import apply_claim_guard
 from .search import is_event_news_hit
@@ -72,6 +72,76 @@ def _safe_dump_payload(payload: Any) -> str:
     if len(encoded) > _PROMPT_TOTAL_MAX_LEN:
         encoded = encoded[:_PROMPT_TOTAL_MAX_LEN]
     return encoded
+
+
+class CostCapExceeded(RuntimeError):
+    """Raised when a cumulative cost meter has surpassed the configured cap."""
+
+
+# Conservative per-call cost estimate in EUR. The campaign-wide preflight
+# accounts ~0.05 EUR per "item" (which fans out into several LLM calls);
+# treat each call as ~1/3 of an item so the runtime meter stays consistent
+# with the preflight estimator.
+_DEFAULT_PER_CALL_COST_EUR = 0.02
+
+
+class CostBudget:
+    """Thread-safe cumulative cost meter with a hard cap.
+
+    A cap_eur <= 0 disables enforcement. The meter is intended to be
+    attached to a single in-flight campaign; sharing it across concurrent
+    campaigns is not supported.
+    """
+
+    def __init__(
+        self,
+        cap_eur: float,
+        *,
+        per_call_eur: float = _DEFAULT_PER_CALL_COST_EUR,
+    ) -> None:
+        self.cap_eur = float(cap_eur)
+        self.per_call_eur = float(per_call_eur)
+        self._spent_eur = 0.0
+        self._lock = threading.Lock()
+
+    @property
+    def disabled(self) -> bool:
+        return self.cap_eur <= 0
+
+    @property
+    def spent_eur(self) -> float:
+        with self._lock:
+            return self._spent_eur
+
+    def charge(self, *, estimate_eur: float | None = None) -> float:
+        if self.disabled:
+            return 0.0
+        amount = float(self.per_call_eur if estimate_eur is None else estimate_eur)
+        with self._lock:
+            new_total = self._spent_eur + amount
+            if new_total > self.cap_eur:
+                raise CostCapExceeded(
+                    f"LLM cost cap {self.cap_eur:.2f} EUR exceeded "
+                    f"(would reach {new_total:.2f} EUR)"
+                )
+            self._spent_eur = new_total
+            return new_total
+
+
+def _classify_for_retry(exc: Exception) -> str:
+    """Wrapper around _classify_exception that also flags non-retryable
+    cost-cap errors. CostCapExceeded short-circuits all retry loops."""
+    if isinstance(exc, CostCapExceeded):
+        return "fatal"
+    return _classify_exception(exc)
+
+
+def _backoff_with_jitter(base_seconds: float, attempt: int, *, cap_seconds: float = 30.0) -> float:
+    """Full-jitter exponential backoff: sleep in [0, min(cap, base * 2^attempt)]."""
+    if base_seconds <= 0:
+        return 0.0
+    ceiling = min(cap_seconds, base_seconds * (2 ** max(0, attempt)))
+    return random.uniform(0.0, ceiling)
 
 
 def format_email_subject(value: str) -> str:
@@ -226,6 +296,7 @@ class LLMGateway:
         self._writer_fallback_model = (writer_fallback_model or fallback_chat_model or self._writer_model).strip()
         self._chat_timeout_s = 90.0
         self._embedding_timeout_s = 45.0
+        self._cost_budget: CostBudget | None = None
         self._primary_client = self._build_client(api_key=api_key, base_url=api_base_url)
         self._research_targets: list[tuple[Any, str]] = []
         self._writer_targets: list[tuple[Any, str]] = []
@@ -263,17 +334,29 @@ class LLMGateway:
             kwargs["base_url"] = resolved_base_url
         return OpenAI(**kwargs)
 
-    @retry(wait=wait_exponential(min=1, max=10), stop=stop_after_attempt(3), reraise=True)
+    def set_cost_budget(self, budget: CostBudget | None) -> None:
+        """Attach (or detach) a runtime cost meter. Each call to
+        _call_chat_api will charge the budget before invoking the
+        provider; CostCapExceeded short-circuits before any spend."""
+        self._cost_budget = budget
+
     def _call_embeddings_api(self, *, client: Any, model: str, texts: list[str]) -> Any:
+        # Retries are handled by the outer caller (embed_texts has its own
+        # policy). Removed tenacity to avoid double-retry amplification.
         return client.embeddings.create(
             model=model,
             input=texts,
             timeout=self._embedding_timeout_s,
         )
 
-    @retry(wait=wait_exponential(min=1, max=10), stop=stop_after_attempt(3), reraise=True)
     def _call_chat_api(self, *, client: Any, model: str, system_prompt: str, user_prompt: str) -> Any:
-        # Bug 6: Do not send response_format to Anthropic or certain models that crash with it
+        # Charge runtime cost cap before issuing the request. Outer retry
+        # loops handle transient failures; we do NOT retry here to avoid
+        # double-retry amplification with the manual loops in the writer
+        # path.
+        if self._cost_budget is not None:
+            self._cost_budget.charge()
+
         kwargs = {
             "model": model,
             "messages": [
@@ -282,9 +365,10 @@ class LLMGateway:
             ],
             "timeout": self._chat_timeout_s,
         }
+        # Anthropic-style models served via OpenRouter reject response_format.
         if "anthropic/" not in model.lower() and "claude" not in model.lower():
             kwargs["response_format"] = {"type": "json_object"}
-            
+
         return client.chat.completions.create(**kwargs)
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -547,6 +631,9 @@ class LLMGateway:
                 recommended = _normalize_recommended(recommended, variants)
                 return variants, recommended, sorted(set(global_flags))
             except Exception as exc:
+                # Cost cap is non-retryable: bubble up immediately.
+                if isinstance(exc, CostCapExceeded):
+                    raise
                 kind = _classify_exception(exc)
                 if kind == "fatal":
                     raise RuntimeError(f"LLM fatal error: {exc}") from exc
@@ -563,8 +650,9 @@ class LLMGateway:
                         rewrite_targets=rewrite_targets,
                     )
 
-                sleep_s = backoff_base_seconds * (2**attempt)
-                time.sleep(max(0.0, sleep_s))
+                # Full-jitter exponential backoff to avoid thundering herd
+                # when many workers retry simultaneously.
+                time.sleep(_backoff_with_jitter(backoff_base_seconds, attempt))
                 attempt += 1
 
         if llm_policy == "strict":
@@ -615,6 +703,10 @@ class LLMGateway:
                 if not isinstance(parsed, dict):
                     raise RuntimeError("Unexpected LLM response format")
                 return parsed
+            except CostCapExceeded:
+                # Never try the next target after a cost-cap hit; the cap
+                # is global to the campaign, so retrying just compounds.
+                raise
             except Exception as exc:
                 last_exc = exc
 
@@ -680,6 +772,8 @@ class LLMGateway:
                 user_prompt=_safe_dump_payload(payload),
             )
             return _research_dossier_from_payload(parsed, company=company, research_bundle=research_bundle)
+        except CostCapExceeded:
+            raise
         except Exception as exc:
             if llm_policy == "strict":
                 raise RuntimeError(f"Research dossier generation failed: {exc}") from exc
@@ -768,6 +862,8 @@ class LLMGateway:
                 intro_line=intro_line,
                 cta_line=cta_line,
             )
+        except CostCapExceeded:
+            raise
         except Exception as exc:
             if llm_policy == "strict":
                 raise RuntimeError(f"Instantly draft generation failed: {exc}") from exc

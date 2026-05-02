@@ -694,14 +694,45 @@ class PostgresStore:
                 )
 
     def build_langgraph_checkpointer(self) -> Any | None:
-        try:
-            from langgraph.checkpoint.postgres import PostgresSaver
-        except Exception:
-            return None
-        try:
-            return PostgresSaver.from_conn_string(self._dsn)
-        except Exception:
-            return None
+        # Process-wide singleton: a fresh PostgresSaver opens a new
+        # connection, and we used to call this once per row -> connection
+        # leak under load. Cache the instance under a lock.
+        cached = getattr(self, "_langgraph_checkpointer", None)
+        if cached is not None:
+            return cached
+        lock = getattr(self, "_langgraph_checkpointer_lock", None)
+        if lock is None:
+            import threading as _threading
+            lock = _threading.Lock()
+            self._langgraph_checkpointer_lock = lock  # type: ignore[attr-defined]
+        with lock:
+            cached = getattr(self, "_langgraph_checkpointer", None)
+            if cached is not None:
+                return cached
+            try:
+                from langgraph.checkpoint.postgres import PostgresSaver
+            except Exception:
+                self._langgraph_checkpointer = None  # type: ignore[attr-defined]
+                return None
+            try:
+                saver = PostgresSaver.from_conn_string(self._dsn)
+            except Exception:
+                self._langgraph_checkpointer = None  # type: ignore[attr-defined]
+                return None
+            self._langgraph_checkpointer = saver  # type: ignore[attr-defined]
+            return saver
+
+    def close_langgraph_checkpointer(self) -> None:
+        saver = getattr(self, "_langgraph_checkpointer", None)
+        if saver is None:
+            return
+        close = getattr(saver, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+        self._langgraph_checkpointer = None  # type: ignore[attr-defined]
 
     def _setup_langgraph_checkpoint_schema(self) -> None:
         try:
